@@ -123,6 +123,23 @@ typedef struct
 typedef int (*SortTupleComparator) (const SortTuple *a, const SortTuple *b,
 									Tuplesortstate *state);
 
+/* Multi-key quick sort */
+
+typedef Datum
+(*MkqsGetDatumFunc) (SortTuple      *x,
+					 const int       tupleIndex,
+					 const int       depth,
+					 Tuplesortstate *state,
+					 Datum          *datum,
+					 bool           *isNull,
+					 bool            useFullKey);
+
+typedef void
+(*MkqsHandleDupFunc) (SortTuple      *x,
+					  const int       tupleCount,
+					  const bool      seenNull,
+					  Tuplesortstate *state);
+
 /*
  * The public part of a Tuple sort operation state.  This data structure
  * contains the definition of sort-variant-specific interface methods and
@@ -217,6 +234,21 @@ typedef struct
 	bool		tuples;			/* Can SortTuple.tuple ever be set? */
 
 	void	   *arg;			/* Specific information for the sort variant */
+
+	/*
+	 * Function pointer, referencing a function to get specified datum from
+	 * SortTuple list with multi-key.
+	 * Used by mk_qsort_tuple().
+	*/
+	MkqsGetDatumFunc mkqsGetDatumFunc;
+
+	/*
+	 * Function pointer, referencing a function to handle duplicated tuple
+	 * from SortTuple list with multi-key.
+	 * Used by mk_qsort_tuple().
+	 * For now, the function pointer is filled for only btree index tuple.
+	*/
+	MkqsHandleDupFunc mkqsHandleDupFunc;
 } TuplesortPublic;
 
 /* Sort parallel code from state for sort__start probes */

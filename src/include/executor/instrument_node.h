@@ -196,8 +196,9 @@ typedef enum
 	SORT_TYPE_QUICKSORT = 1 << 1,
 	SORT_TYPE_EXTERNAL_SORT = 1 << 2,
 	SORT_TYPE_EXTERNAL_MERGE = 1 << 3,
+	SORT_TYPE_MK_QSORT = 1 << 4,
 } TuplesortMethod;
-#define NUM_TUPLESORTMETHODS 4
+#define NUM_TUPLESORTMETHODS 5
 
 typedef struct TuplesortInstrumentation
 {

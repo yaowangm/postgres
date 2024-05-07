@@ -126,6 +126,7 @@ bool		trace_sort = false;
 bool		optimize_bounded_sort = true;
 #endif
 
+bool		enable_mk_sort = true;
 
 /*
  * During merge, we use a pre-allocated set of fixed-size slots to hold
@@ -332,6 +333,9 @@ struct Tuplesortstate
 	 * Resource snapshot for time of sort start.
 	 */
 	PGRUsage	ru_start;
+
+	/* Whether multi-key quick sort is used */
+	bool		mkqsUsed;
 };
 
 /*
@@ -523,6 +527,7 @@ typedef struct RadixSortInfo
  */
 #define QSORT_THRESHOLD 40
 
+#include "mk_qsort_tuple.c"
 
 /*
  *		tuplesort_begin_xxx
@@ -590,6 +595,7 @@ tuplesort_begin_common(int workMem, SortCoordinate coordinate, int sortopt)
 	state->base.sortopt = sortopt;
 	state->base.tuples = true;
 	state->abbrevNext = 10;
+	state->mkqsUsed = false;
 
 	/*
 	 * workMem is forced to be at least 64KB, the current minimum valid value
@@ -2418,6 +2424,8 @@ tuplesort_get_stats(Tuplesortstate *state,
 		case TSS_SORTEDINMEM:
 			if (state->boundUsed)
 				stats->sortMethod = SORT_TYPE_TOP_N_HEAPSORT;
+			else if (state->mkqsUsed)
+				stats->sortMethod = SORT_TYPE_MK_QSORT;
 			else
 				stats->sortMethod = SORT_TYPE_QUICKSORT;
 			break;
@@ -2451,6 +2459,8 @@ tuplesort_method_name(TuplesortMethod m)
 			return "external sort";
 		case SORT_TYPE_EXTERNAL_MERGE:
 			return "external merge";
+		case SORT_TYPE_MK_QSORT:
+			return "multi-key quick sort";
 	}
 
 	return "unknown";
@@ -3001,7 +3011,41 @@ tuplesort_sort_memtuples(Tuplesortstate *state)
 	if (state->memtupcount > 1)
 	{
 		/*
-		 * Do we have the leading column's value or abbreviation in datum1?
+		 * Apply multi-key quick sort when:
+		 *   1. enable_mk_sort is set
+		 *   2. There are multiple keys available
+		 *   3. mkqsGetDatumFunc is filled, which implies that current tuple
+		 *      type is supported by mk qsort. (By now only Heap tuple and Btree
+		 *      Index tuple are supported, and more types may be supported in
+		 *      future.)
+		 *
+		 * A summary of tuple types supported by mk qsort:
+		 *
+		 *   HeapTuple: supported
+		 *   IndexTuple(btree): supported
+		 *   IndexTuple(hash): not supported because there is only one key
+		 *   DatumTuple: not supported because there is only one key
+		 *   HeapTuple(for cluster): not supported yet
+		 *   IndexTuple(gist): not supported yet
+		 *   IndexTuple(brin): not supported yet
+		 */
+		if (enable_mk_sort &&
+			state->base.nKeys > 1 &&
+			state->base.mkqsGetDatumFunc != NULL)
+		{
+			state->mkqsUsed = true;
+			mk_qsort_tuple(state->memtuples,
+						   state->memtupcount,
+						   0,
+						   state,
+						   false);
+
+			return;
+		}
+
+		/*
+		 * Do we have the leading column's value or abbreviation in datum1,
+		 * and is there a specialization for its comparator?
 		 */
 		if (state->base.haveDatum1 && state->base.sortKeys)
 		{

@@ -961,6 +961,13 @@
   boot_val => 'true',
 },
 
+{ name => 'enable_mk_sort', type => 'bool', context => 'PGC_USERSET', group => 'QUERY_TUNING_METHOD',
+  short_desc => 'Enables multi-key quick sort.',
+  flags => 'GUC_EXPLAIN',
+  variable => 'enable_mk_sort',
+  boot_val => 'true',
+},
+
 { name => 'enable_nestloop', type => 'bool', context => 'PGC_USERSET', group => 'QUERY_TUNING_METHOD',
   short_desc => 'Enables the planner\'s use of nested-loop join plans.',
   flags => 'GUC_EXPLAIN',

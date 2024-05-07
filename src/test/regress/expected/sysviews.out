@@ -169,6 +169,7 @@ select name, setting from pg_settings where name like 'enable%';
  enable_material                | on
  enable_memoize                 | on
  enable_mergejoin               | on
+ enable_mk_sort                 | on
  enable_nestloop                | on
  enable_parallel_append         | on
  enable_parallel_hash           | on
@@ -180,7 +181,7 @@ select name, setting from pg_settings where name like 'enable%';
  enable_seqscan                 | on
  enable_sort                    | on
  enable_tidscan                 | on
-(25 rows)
+(26 rows)
 
 -- There are always wait event descriptions for various types.  InjectionPoint
 -- may be present or absent, depending on history since last postmaster start.
@@ -239,4 +240,3 @@ select * from pg_timezone_abbrevs where abbrev = 'LMT';
 --------+-------------------------------+--------
  LMT    | @ 7 hours 52 mins 58 secs ago | f
 (1 row)
-
