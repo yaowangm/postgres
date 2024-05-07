@@ -30,6 +30,7 @@
 #include "utils/guc.h"
 #include "utils/lsyscache.h"
 #include "utils/tuplesort.h"
+#include "miscadmin.h"
 
 
 /* sort-type codes for sort__start probes */
@@ -91,6 +92,48 @@ static void writetup_datum(Tuplesortstate *state, LogicalTape *tape,
 static void readtup_datum(Tuplesortstate *state, SortTuple *stup,
 						  LogicalTape *tape, unsigned int len);
 static void freestate_cluster(Tuplesortstate *state);
+
+static void mkqs_get_datum_heap(const SortTuple *x1,
+								const SortTuple *x2,
+								const int depth,
+								Tuplesortstate *state,
+								Datum *datum1,
+								bool *isNull1,
+								Datum *datum2,
+								bool *isNull2);
+
+static void
+mkqs_get_datum_index_btree(const SortTuple *x1,
+						   const SortTuple *x2,
+						   const int depth,
+						   Tuplesortstate *state,
+						   Datum *datum1,
+						   bool *isNull1,
+						   Datum *datum2,
+						   bool *isNull2);
+
+static void
+			mkqs_handle_dup_index_btree(SortTuple *x,
+										const int tupleCount,
+										const bool seenNull,
+										Tuplesortstate *state);
+
+static int
+			mkqs_compare_equal_index_btree(const SortTuple *a,
+										   const SortTuple *b,
+										   Tuplesortstate *state);
+
+static pg_attribute_always_inline void
+extract_heaptuple_from_sorttuple(const SortTuple *sortTuple,
+								 HeapTupleData *heapTuple);
+
+static inline int
+			tuplesort_compare_by_item_pointer(const IndexTuple tuple1,
+											  const IndexTuple tuple2);
+
+static inline void
+			raise_error_of_dup_index(IndexTuple x,
+									 Tuplesortstate *state);
 
 /*
  * Data structure pointed by "TuplesortPublic.arg" for the CLUSTER case.  Set by
@@ -163,6 +206,14 @@ typedef struct BrinSortTuple
 /* Size of the BrinSortTuple, given length of the BrinTuple. */
 #define BRINSORTTUPLE_SIZE(len)		(offsetof(BrinSortTuple, tuple) + (len))
 
+#define ST_SORT qsort_tuple_by_itempointer
+#define ST_ELEMENT_TYPE SortTuple
+#define ST_COMPARE(a, b, state) mkqs_compare_equal_index_btree(a, b, state)
+#define ST_COMPARE_ARG_TYPE Tuplesortstate
+#define ST_CHECK_FOR_INTERRUPTS
+#define ST_SCOPE static
+#define ST_DEFINE
+#include "lib/sort_template.h"
 
 Tuplesortstate *
 tuplesort_begin_heap(TupleDesc tupDesc,
@@ -200,6 +251,7 @@ tuplesort_begin_heap(TupleDesc tupDesc,
 	base->removeabbrev = removeabbrev_heap;
 	base->comparetup = comparetup_heap;
 	base->comparetup_tiebreak = comparetup_heap_tiebreak;
+	base->mkqsGetDatumFunc = mkqs_get_datum_heap;
 	base->writetup = writetup_heap;
 	base->readtup = readtup_heap;
 	base->haveDatum1 = true;
@@ -388,6 +440,8 @@ tuplesort_begin_index_btree(Relation heapRel,
 	base->removeabbrev = removeabbrev_index;
 	base->comparetup = comparetup_index_btree;
 	base->comparetup_tiebreak = comparetup_index_btree_tiebreak;
+	base->mkqsGetDatumFunc = mkqs_get_datum_index_btree;
+	base->mkqsHandleDupFunc = mkqs_handle_dup_index_btree;
 	base->writetup = writetup_index;
 	base->readtup = readtup_index;
 	base->haveDatum1 = true;
@@ -1531,10 +1585,6 @@ comparetup_index_btree_tiebreak(const SortTuple *a, const SortTuple *b,
 	 */
 	if (arg->enforceUnique && !(!arg->uniqueNullsNotDistinct && equal_hasnull))
 	{
-		Datum		values[INDEX_MAX_KEYS];
-		bool		isnull[INDEX_MAX_KEYS];
-		char	   *key_desc;
-
 		/*
 		 * Some rather brain-dead implementations of qsort (such as the one in
 		 * QNX 4) will sometimes call the comparison routine to compare a
@@ -1543,18 +1593,7 @@ comparetup_index_btree_tiebreak(const SortTuple *a, const SortTuple *b,
 		 */
 		Assert(tuple1 != tuple2);
 
-		index_deform_tuple(tuple1, tupDes, values, isnull);
-
-		key_desc = BuildIndexValueDescription(arg->index.indexRel, values, isnull);
-
-		ereport(ERROR,
-				(errcode(ERRCODE_UNIQUE_VIOLATION),
-				 errmsg("could not create unique index \"%s\"",
-						RelationGetRelationName(arg->index.indexRel)),
-				 key_desc ? errdetail("Key %s is duplicated.", key_desc) :
-				 errdetail("Duplicate keys exist."),
-				 errtableconstraint(arg->index.heapRel,
-									RelationGetRelationName(arg->index.indexRel))));
+		raise_error_of_dup_index(tuple1, state);
 	}
 
 	/*
@@ -1563,25 +1602,7 @@ comparetup_index_btree_tiebreak(const SortTuple *a, const SortTuple *b,
 	 * attribute in order to ensure that all keys in the index are physically
 	 * unique.
 	 */
-	{
-		BlockNumber blk1 = ItemPointerGetBlockNumber(&tuple1->t_tid);
-		BlockNumber blk2 = ItemPointerGetBlockNumber(&tuple2->t_tid);
-
-		if (blk1 != blk2)
-			return (blk1 < blk2) ? -1 : 1;
-	}
-	{
-		OffsetNumber pos1 = ItemPointerGetOffsetNumber(&tuple1->t_tid);
-		OffsetNumber pos2 = ItemPointerGetOffsetNumber(&tuple2->t_tid);
-
-		if (pos1 != pos2)
-			return (pos1 < pos2) ? -1 : 1;
-	}
-
-	/* ItemPointer values should never be equal */
-	Assert(false);
-
-	return 0;
+	return tuplesort_compare_by_item_pointer(tuple1, tuple2);
 }
 
 static int
@@ -1887,4 +1908,210 @@ readtup_datum(Tuplesortstate *state, SortTuple *stup,
 
 	if (base->sortopt & TUPLESORT_RANDOMACCESS) /* need trailing length word? */
 		LogicalTapeReadExact(tape, &tuplen, sizeof(tuplen));
+}
+
+/*
+ * Get specified datums from SortTuple (HeapTuple) list
+ *
+ * When x1 and x2 are provided by caller, two datums will be returned.
+ * When x2 is NULL, only one datum will be returned.
+ *
+ * Note the function does not check leading sort key (tuple->datum1 and
+ * tuple->isnull), which should be checked in other functions (e.g.
+ * mkqs_compare_datum()).
+ *
+ * See comparetup_heap() for details.
+ */
+static void mkqs_get_datum_heap(const SortTuple *x1,
+								const SortTuple *x2,
+								const int depth,
+								Tuplesortstate *state,
+								Datum *datum1,
+								bool *isNull1,
+								Datum *datum2,
+								bool *isNull2)
+{
+	TupleDesc	tupDesc = NULL;
+	HeapTupleData heapTuple1, heapTuple2;
+	AttrNumber	attno;
+	TuplesortPublic *base = TuplesortstateGetPublic(state);
+	SortSupport sortKey = base->sortKeys + depth;;
+
+	Assert(state);
+	Assert(x1 != NULL);
+
+	tupDesc = (TupleDesc) base->arg;
+	attno = sortKey->ssup_attno;
+
+	/* Extract datum from sortTuple->tuple */
+	extract_heaptuple_from_sorttuple(x1, &heapTuple1);
+	*datum1 = heap_getattr(&heapTuple1, attno, tupDesc, isNull1);
+
+	if (x2 != NULL)
+	{
+		extract_heaptuple_from_sorttuple(x2, &heapTuple2);
+		*datum2 = heap_getattr(&heapTuple2, attno, tupDesc, isNull2);
+	}
+}
+
+static pg_attribute_always_inline void
+extract_heaptuple_from_sorttuple(const SortTuple *sortTuple,
+								 HeapTupleData *heapTuple)
+{
+	heapTuple->t_len = ((MinimalTuple) sortTuple->tuple)->t_len
+						+ MINIMAL_TUPLE_OFFSET;
+	heapTuple->t_data = (HeapTupleHeader) ((char *) sortTuple->tuple
+						- MINIMAL_TUPLE_OFFSET);
+}
+
+/*
+ * Get specified datums from SortTuple (IndexTuple for btree index) list
+ *
+ * When x1 and x2 are provided by caller, two datums will be returned.
+ * When x2 is NULL, only one datum will be returned.
+ *
+ * Note the function does not check leading sort key (tuple->datum1 and
+ * tuple->isnull), which should be checked in other functions (e.g.
+ * mkqs_compare_datum()).
+ *
+ * See comparetup_index_btree() for details.
+ */
+static void
+mkqs_get_datum_index_btree(const SortTuple *x1,
+						   const SortTuple *x2,
+						   const int depth,
+						   Tuplesortstate *state,
+						   Datum *datum1,
+						   bool *isNull1,
+						   Datum *datum2,
+						   bool *isNull2)
+{
+	TupleDesc	tupDesc;
+	IndexTuple	indexTuple1, indexTuple2;
+	TuplesortPublic *base = TuplesortstateGetPublic(state);
+	TuplesortIndexBTreeArg *arg = (TuplesortIndexBTreeArg *) base->arg;
+
+	Assert(state);
+	Assert(x1);
+
+	tupDesc = RelationGetDescr(arg->index.indexRel);
+	indexTuple1 = (IndexTuple) x1->tuple;
+
+	/*
+	 * Set parameter attnum = depth + 1 because attnum starts from 1 but depth
+	 * starts from 0
+	 */
+	*datum1 = index_getattr(indexTuple1, depth + 1, tupDesc, isNull1);
+
+	if (x2 != NULL)
+	{
+		indexTuple2 = (IndexTuple) x2->tuple;
+		*datum2 = index_getattr(indexTuple2, depth + 1, tupDesc, isNull2);
+	}
+}
+
+/*
+ * Handle duplicated SortTuples (IndexTuple for btree index during mk qsort)
+ *  x: the duplicated tuple list
+ *  tupleCount: count of the tuples
+ */
+static void
+mkqs_handle_dup_index_btree(SortTuple *x,
+							const int tupleCount,
+							const bool seenNull,
+							Tuplesortstate *state)
+{
+	TuplesortPublic *base = TuplesortstateGetPublic(state);
+	TuplesortIndexBTreeArg *arg = (TuplesortIndexBTreeArg *) base->arg;
+
+	/* If enforceUnique is enabled and we never saw NULL, raise error */
+	if (arg->enforceUnique && !(!arg->uniqueNullsNotDistinct && seenNull))
+	{
+		/*
+		 * x means the first tuple of duplicated tuple list Since they are
+		 * duplicated, simply pick up the first one to raise error
+		 */
+		raise_error_of_dup_index((IndexTuple) (x->tuple), state);
+	}
+
+	/*
+	 * If key values are equal, we sort on ItemPointer.  This is required for
+	 * btree indexes, since heap TID is treated as an implicit last key
+	 * attribute in order to ensure that all keys in the index are physically
+	 * unique.
+	 */
+	qsort_tuple_by_itempointer(x,
+							   tupleCount,
+							   state);
+}
+
+/*
+ * Compare two btree index tuples by ItemPointer
+ * It is a callback function for qsort_tuple() called by
+ * mkqs_handle_dup_index_btree()
+ */
+static int
+mkqs_compare_equal_index_btree(const SortTuple *a,
+							   const SortTuple *b,
+							   Tuplesortstate *state)
+{
+	IndexTuple	tuple1;
+	IndexTuple	tuple2;
+
+	tuple1 = (IndexTuple) a->tuple;
+	tuple2 = (IndexTuple) b->tuple;
+
+	return tuplesort_compare_by_item_pointer(tuple1, tuple2);
+}
+
+/* Compare two index tuples by ItemPointer */
+static inline int
+tuplesort_compare_by_item_pointer(const IndexTuple tuple1,
+								  const IndexTuple tuple2)
+{
+	{
+		BlockNumber blk1 = ItemPointerGetBlockNumber(&tuple1->t_tid);
+		BlockNumber blk2 = ItemPointerGetBlockNumber(&tuple2->t_tid);
+
+		if (blk1 != blk2)
+			return (blk1 < blk2) ? -1 : 1;
+	}
+	{
+		OffsetNumber pos1 = ItemPointerGetOffsetNumber(&tuple1->t_tid);
+		OffsetNumber pos2 = ItemPointerGetOffsetNumber(&tuple2->t_tid);
+
+		if (pos1 != pos2)
+			return (pos1 < pos2) ? -1 : 1;
+	}
+
+	/* ItemPointer values should never be equal */
+	Assert(false);
+
+	return 0;
+}
+
+/* Raise error for duplicated tuple when creating unique index */
+static inline void
+raise_error_of_dup_index(IndexTuple x,
+						 Tuplesortstate *state)
+{
+	Datum		values[INDEX_MAX_KEYS];
+	bool		isnull[INDEX_MAX_KEYS];
+	TupleDesc	tupDesc;
+	char	   *key_desc;
+	TuplesortPublic *base = TuplesortstateGetPublic(state);
+	TuplesortIndexBTreeArg *arg = (TuplesortIndexBTreeArg *) base->arg;
+
+	tupDesc = RelationGetDescr(arg->index.indexRel);
+	index_deform_tuple((IndexTuple) x, tupDesc, values, isnull);
+	key_desc = BuildIndexValueDescription(arg->index.indexRel, values, isnull);
+
+	ereport(ERROR,
+			(errcode(ERRCODE_UNIQUE_VIOLATION),
+			 errmsg("could not create unique index \"%s\"",
+					RelationGetRelationName(arg->index.indexRel)),
+			 key_desc ? errdetail("Key %s is duplicated.", key_desc) :
+			 errdetail("Duplicate keys exist."),
+			 errtableconstraint(arg->index.heapRel,
+								RelationGetRelationName(arg->index.indexRel))));
 }
