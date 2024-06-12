@@ -63,6 +63,14 @@ typedef struct SortCoordinateData
 
 typedef struct SortCoordinateData *SortCoordinate;
 
+typedef enum
+{
+	MKQS_COMP_FUNC_GENERIC,
+	MKQS_COMP_FUNC_UNSIGNED,
+	MKQS_COMP_FUNC_SIGNED,
+	MKQS_COMP_FUNC_INT32
+} MkqsCompFuncType;
+
 /* Bitwise option flags for tuple sorts */
 #define TUPLESORT_NONE					0
 
@@ -131,8 +139,17 @@ typedef Datum
 								 const int depth,
 								 Tuplesortstate *state,
 								 Datum *datum,
-								 bool *isNull,
-								 bool useFullKey);
+								 bool *isNull);
+
+typedef void
+		 (*MkqsGetTwoDatumFunc) (const SortTuple *x1,
+								 const SortTuple *x2,
+								 const int depth,
+								 Tuplesortstate *state,
+								 Datum *datum1,
+								 bool *isNull1,
+								 Datum *datum2,
+								 bool *isNull2);
 
 typedef void
 			(*MkqsHandleDupFunc) (SortTuple *x,
@@ -242,11 +259,19 @@ typedef struct
 	MkqsGetDatumFunc mkqsGetDatumFunc;
 
 	/*
+	 * Function pointer, referencing a function to get specified two datums from
+	 * SortTuple list with multi-key. Used by mk_qsort_tuple().
+	 */
+	MkqsGetTwoDatumFunc mkqsGetTwoDatumFunc;
+
+	/*
 	 * Function pointer, referencing a function to handle duplicated tuple
 	 * from SortTuple list with multi-key. Used by mk_qsort_tuple(). For now,
 	 * the function pointer is filled for only btree index tuple.
 	 */
 	MkqsHandleDupFunc mkqsHandleDupFunc;
+
+	MkqsCompFuncType mkqsCompFuncType;
 } TuplesortPublic;
 
 /* Sort parallel code from state for sort__start probes */

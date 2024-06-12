@@ -53,7 +53,7 @@ mkqs_vec_swap(int a,
 /*
  * Check whether current datum (at specified tuple and depth) is null
  * Note that the input x means a specified tuple provided by caller but not
- * a tuple array, so tupleIndex is unnecessary
+ * a tuple array, so tupleIndex is unnecessary.
  */
 static inline bool
 check_datum_null(SortTuple *x,
@@ -65,13 +65,11 @@ check_datum_null(SortTuple *x,
 
 	Assert(depth < state->base.nKeys);
 
-	/* Since we have a specified tuple, the tupleIndex is always 0 */
-	state->base.mkqsGetDatumFunc(x, 0, depth, state, &datum, &isNull, false);
+	if (depth == 0)
+		return x->isnull1;
 
-	/*
-	 * Note: for "abbreviated key", we don't need to handle more here because
-	 * if "abbreviated key" of a datum is null, the "full" datum must be null.
-	 */
+	/* Since we have a specified tuple, the tupleIndex is always 0 */
+	state->base.mkqsGetDatumFunc(x, 0, depth, state, &datum, &isNull);
 
 	return isNull;
 }
@@ -94,10 +92,10 @@ check_datum_null(SortTuple *x,
  * See comparetup_heap() for details.
  */
 static inline int
-mkqs_compare_datum(SortTuple *tuple1,
-				   SortTuple *tuple2,
-				   int depth,
-				   Tuplesortstate *state)
+mkqs_compare_datum_tiebreak(SortTuple *tuple1,
+							SortTuple *tuple2,
+							int depth,
+							Tuplesortstate *state)
 {
 	Datum		datum1,
 				datum2;
@@ -106,45 +104,133 @@ mkqs_compare_datum(SortTuple *tuple1,
 	SortSupport sortKey;
 	int			ret = 0;
 
-	Assert(state->base.mkqsGetDatumFunc);
+	Assert(state->base.mkqsGetTwoDatumFunc);
 	Assert(depth < state->base.nKeys);
 
 	sortKey = state->base.sortKeys + depth;
-	state->base.mkqsGetDatumFunc(tuple1, 0, depth, state,
-								 &datum1, &isNull1, false);
-	state->base.mkqsGetDatumFunc(tuple2, 0, depth, state,
-								 &datum2, &isNull2, false);
-
-	ret = ApplySortComparator(datum1,
-							  isNull1,
-							  datum2,
-							  isNull2,
-							  sortKey);
+	state->base.mkqsGetTwoDatumFunc(tuple1,
+									tuple2,
+									depth,
+									state,
+									&datum1,
+									&isNull1,
+									&datum2,
+									&isNull2);
 
 	/*
 	 * If "abbreviated key" is enabled, and we are in the first depth, it
-	 * means only "abbreviated keys" are compared. If the two datums are
-	 * determined to be equal by ApplySortComparator(), we need to perform an
-	 * extra "full" comparing by ApplySortAbbrevFullComparator().
+	 * means only "abbreviated keys" was compared. If the two datums were
+	 * determined to be equal by ApplySortComparator() in
+	 * mkqs_compare_datum(), we need to perform an extra "full" comparing
+	 * by ApplySortAbbrevFullComparator().
 	 */
 	if (sortKey->abbrev_converter &&
-		depth == 0 &&
-		ret == 0)
+		depth == 0)
 	{
-		/* Fetch "full" datum by setting useFullKey = true */
-		state->base.mkqsGetDatumFunc(tuple1, 0, depth, state,
-									 &datum1, &isNull1, true);
-		state->base.mkqsGetDatumFunc(tuple2, 0, depth, state,
-									 &datum2, &isNull2, true);
-
 		ret = ApplySortAbbrevFullComparator(datum1,
 											isNull1,
 											datum2,
 											isNull2,
 											sortKey);
 	}
+	else
+	{
+		ret = ApplySortComparator(datum1,
+								  isNull1,
+								  datum2,
+								  isNull2,
+								  sortKey);
+
+	}
 
 	return ret;
+}
+
+/*
+ * Compare two tuples at specified depth
+ *
+ * Firstly try to call some shortcuts by checking state->base.mkqsCompFuncType,
+ * which are much faster because they just compare leading sort keys; if it is
+ * infeasible, call mkqs_compare_datum_tiebreak().
+ *
+ * The reason to use MkqsCompFuncType but not compare function pointers
+ * directly is just for performance.
+ *
+ * See comparetup_heap() for details.
+ */
+static inline int
+mkqs_compare_datum(SortTuple *tuple1,
+				   SortTuple *tuple2,
+				   int depth,
+				   Tuplesortstate *state)
+{
+	int			ret = 0;
+	MkqsCompFuncType compFuncType = state->base.mkqsCompFuncType;
+
+	if (depth == 0)
+	{
+		if (compFuncType == MKQS_COMP_FUNC_UNSIGNED)
+		{
+			ret = ApplyUnsignedSortComparator(tuple1->datum1,
+											  tuple1->isnull1,
+											  tuple2->datum1,
+											  tuple2->isnull1,
+											  &state->base.sortKeys[0]);
+		}
+		else if (compFuncType == MKQS_COMP_FUNC_SIGNED)
+		{
+			ret = ApplySignedSortComparator(tuple1->datum1,
+											tuple1->isnull1,
+											tuple2->datum1,
+											tuple2->isnull1,
+											&state->base.sortKeys[0]);
+		}
+		else if (compFuncType == MKQS_COMP_FUNC_INT32)
+		{
+			ret = ApplyInt32SortComparator(tuple1->datum1,
+										   tuple1->isnull1,
+										   tuple2->datum1,
+										   tuple2->isnull1,
+										   &state->base.sortKeys[0]);
+		}
+		else
+		{
+			Assert(compFuncType == MKQS_COMP_FUNC_GENERIC);
+			ret = ApplySortComparator(tuple1->datum1,
+									  tuple1->isnull1,
+									  tuple2->datum1,
+									  tuple2->isnull1,
+									  &state->base.sortKeys[0]);
+		}
+
+		if (ret != 0)
+			return ret;
+		if (!state->base.sortKeys->abbrev_converter)
+			return ret;
+	}
+
+	ret = mkqs_compare_datum_tiebreak(tuple1,
+									  tuple2,
+									  depth,
+									  state);
+
+	return ret;
+}
+
+/* Find the median of three values */
+static inline int
+get_median_from_three(int a,
+					  int b,
+					  int c,
+					  SortTuple *x,
+					  int depth,
+					  Tuplesortstate *state)
+{
+	return mkqs_compare_datum(x + a, x + b, depth, state) < 0 ?
+			 (mkqs_compare_datum(x + b, x + c, depth, state) < 0 ?
+				b : (mkqs_compare_datum(x + a, x + c, depth, state) < 0 ? c : a))
+			 : (mkqs_compare_datum(x + b, x + c, depth, state) > 0 ?
+				b : (mkqs_compare_datum(x + a, x + c, depth, state) < 0 ? a : c));
 }
 
 #ifdef USE_ASSERT_CHECKING
@@ -196,7 +282,8 @@ mk_qsort_tuple(SortTuple *x,
 				lessEnd,
 				greaterStart,
 				greaterEnd,
-				tupCount;
+				tupCount,
+				m;
 	int32		dist;
 	SortTuple  *pivot;
 	bool		isDatumNull;
@@ -205,6 +292,7 @@ mk_qsort_tuple(SortTuple *x,
 	Assert(depth <= state->base.nKeys);
 	Assert(state->base.sortKeys);
 	Assert(state->base.mkqsGetDatumFunc);
+	Assert(state->base.mkqsGetTwoDatumFunc);
 
 	if (n <= 1)
 		return;
@@ -241,7 +329,27 @@ mk_qsort_tuple(SortTuple *x,
 		return;
 
 	/* Select pivot by random and move it to the first position */
-	lessStart = n / 2;
+	m = n / 2;
+
+	/*
+	 * Use 16 instead of 7 which is used in standard qsort, because mk qsort
+	 * need more cost to calculate median value in get_median_from_three().
+	 */
+	if (n > 16)
+	{
+		int l, r, d;
+		l = 0;
+		r = n - 1;
+		if (n > 40)
+		{
+			d = n / 8;
+			l = get_median_from_three(l, l + d, l + 2 * d, x, depth, state);
+			m = get_median_from_three(m - d, m, m + d, x, depth, state);
+			r = get_median_from_three(r - 2 * d, r - d, r, x, depth, state);
+		}
+		m = get_median_from_three(l, m, r, x, depth, state);
+	}
+	lessStart = m;
 	mkqs_swap(0, lessStart, x);
 	pivot = x;
 
