@@ -2748,6 +2748,28 @@ tuplesort_sort_memtuples(Tuplesortstate *state)
 			state->base.mkqsGetDatumFunc != NULL)
 		{
 			state->mkqsUsed = true;
+
+			/*
+			 * Set relevant Datum Sort Comparator according to concrete data type
+			 * of the first sort key
+			 */
+			if (state->base.sortKeys[0].comparator == ssup_datum_unsigned_cmp)
+			{
+				state->base.mkqsCompFuncType = MKQS_COMP_FUNC_UNSIGNED;
+			}
+			else if (state->base.sortKeys[0].comparator == ssup_datum_signed_cmp)
+			{
+				state->base.mkqsCompFuncType = MKQS_COMP_FUNC_SIGNED;
+			}
+			else if (state->base.sortKeys[0].comparator == ssup_datum_int32_cmp)
+			{
+				state->base.mkqsCompFuncType = MKQS_COMP_FUNC_INT32;
+			}
+			else
+			{
+				state->base.mkqsCompFuncType = MKQS_COMP_FUNC_GENERIC;
+			}
+
 			mk_qsort_tuple(state->memtuples,
 						   state->memtupcount,
 						   0,

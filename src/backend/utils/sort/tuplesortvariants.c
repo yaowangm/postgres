@@ -98,16 +98,23 @@ static Datum mkqs_get_datum_heap(SortTuple *x,
 								 const int depth,
 								 Tuplesortstate *state,
 								 Datum *datum,
-								 bool *isNull,
-								 bool useFullKey);
+								 bool *isNull);
+
+static void mkqs_get_two_datum_heap(const SortTuple *x1,
+									const SortTuple *x2,
+									const int depth,
+									Tuplesortstate *state,
+									Datum *datum1,
+									bool *isNull1,
+									Datum *datum2,
+									bool *isNull2);
 
 static Datum mkqs_get_datum_index_btree(SortTuple *x,
 										const int tupleIndex,
 										const int depth,
 										Tuplesortstate *state,
 										Datum *datum,
-										bool *isNull,
-										bool useFullKey);
+										bool *isNull);
 
 static void
 			mkqs_handle_dup_index_btree(SortTuple *x,
@@ -119,6 +126,10 @@ static int
 			mkqs_compare_equal_index_btree(const SortTuple *a,
 										   const SortTuple *b,
 										   Tuplesortstate *state);
+
+static pg_attribute_always_inline void
+extract_heaptuple_from_sorttuple(const SortTuple *sortTuple,
+								 HeapTupleData *heapTuple);
 
 static inline int
 			tuplesort_compare_by_item_pointer(const IndexTuple tuple1,
@@ -245,6 +256,7 @@ tuplesort_begin_heap(TupleDesc tupDesc,
 	base->comparetup = comparetup_heap;
 	base->comparetup_tiebreak = comparetup_heap_tiebreak;
 	base->mkqsGetDatumFunc = mkqs_get_datum_heap;
+	base->mkqsGetTwoDatumFunc = mkqs_get_two_datum_heap;
 	base->writetup = writetup_heap;
 	base->readtup = readtup_heap;
 	base->haveDatum1 = true;
@@ -1906,14 +1918,9 @@ readtup_datum(Tuplesortstate *state, SortTuple *stup,
 /*
  * Get specified datum from SortTuple (HeapTuple) list
  *
- * If the first datum is requested (depth == 0), sortTuple->datum1/isnull1
- * will be returned. For other datums, relevant datum will be extracted from
- * sortTuple->tuple.
- *
- * The parameter "useFullKey" is used for scenario of "abbreviated key":
- *   false - get sortTuple->datum1/isnull1 (abbreviated key)
- *   true - get the "full" datum
- * If "abbreviated key" is disabled, useFullKey will be ignored.
+ * Note the function does not check leading sort key (tuple->datum1 and
+ * tuple->isnull), which should be checked in other functions (e.g.
+ * mkqs_compare_datum()).
  *
  * See comparetup_heap() for details.
  */
@@ -1923,8 +1930,7 @@ mkqs_get_datum_heap(SortTuple *x,
 					int depth,
 					Tuplesortstate *state,
 					Datum *datum,
-					bool *isNull,
-					bool useFullKey)
+					bool *isNull)
 {
 	TupleDesc	tupDesc = NULL;
 	HeapTupleData heapTuple;
@@ -1935,29 +1941,11 @@ mkqs_get_datum_heap(SortTuple *x,
 
 	Assert(state);
 
-	/*
-	 * useFullKey is valid only when depth == 0, because only the first datum
-	 * may be involved to "abbreviated key", so only the first datum need to
-	 * be checked with "full" version.
-	 */
-	AssertImply(useFullKey, depth == 0);
-
 	tupDesc = (TupleDesc) base->arg;
 
-	/*
-	 * When useFullKey is false, and the first datum is requested, return the
-	 * leading datum
-	 */
-	if (depth == 0 && !useFullKey)
-	{
-		*datum = sortTuple->datum1;
-		*isNull = sortTuple->isnull1;
-		return *datum;
-	}
+	/* Extract datum from sortTuple->tuple */
+	extract_heaptuple_from_sorttuple(sortTuple, &heapTuple);
 
-	/* For any datums which depth > 0, extract it from sortTuple->tuple */
-	heapTuple.t_len = ((MinimalTuple) sortTuple->tuple)->t_len + MINIMAL_TUPLE_OFFSET;
-	heapTuple.t_data = (HeapTupleHeader) ((char *) sortTuple->tuple - MINIMAL_TUPLE_OFFSET);
 	attno = sortKey->ssup_attno;
 	*datum = heap_getattr(&heapTuple, attno, tupDesc, isNull);
 
@@ -1965,16 +1953,62 @@ mkqs_get_datum_heap(SortTuple *x,
 }
 
 /*
+ * Get two specified datums from SortTuple (HeapTuple) list
+ *
+ * The function is similar to mkqs_get_datum_heap() except it fetchs two
+ * datums rather than one. The weird design is just to void extra perf
+ * cost of calling mkqs_get_datum_heap() twice in mk qsort.
+ *
+ * Note the function does not check leading sort key (tuple->datum1 and
+ * tuple->isnull), which should be checked in other functions (e.g.
+ * mkqs_compare_datum()).
+ *
+ * See comparetup_heap() for details.
+ */
+static void mkqs_get_two_datum_heap(const SortTuple *x1,
+									const SortTuple *x2,
+									const int depth,
+									Tuplesortstate *state,
+									Datum *datum1,
+									bool *isNull1,
+									Datum *datum2,
+									bool *isNull2)
+{
+	TupleDesc	tupDesc = NULL;
+	HeapTupleData heapTuple1, heapTuple2;
+	AttrNumber	attno;
+	TuplesortPublic *base = TuplesortstateGetPublic(state);
+	SortSupport sortKey = base->sortKeys + depth;;
+
+	Assert(state);
+
+	tupDesc = (TupleDesc) base->arg;
+
+	/* Extract datum from sortTuple->tuple */
+	extract_heaptuple_from_sorttuple(x1, &heapTuple1);
+	extract_heaptuple_from_sorttuple(x2, &heapTuple2);
+
+	attno = sortKey->ssup_attno;
+	*datum1 = heap_getattr(&heapTuple1, attno, tupDesc, isNull1);
+	*datum2 = heap_getattr(&heapTuple2, attno, tupDesc, isNull2);
+}
+
+static pg_attribute_always_inline void
+extract_heaptuple_from_sorttuple(const SortTuple *sortTuple,
+								 HeapTupleData *heapTuple)
+{
+	heapTuple->t_len = ((MinimalTuple) sortTuple->tuple)->t_len
+						+ MINIMAL_TUPLE_OFFSET;
+	heapTuple->t_data = (HeapTupleHeader) ((char *) sortTuple->tuple
+						- MINIMAL_TUPLE_OFFSET);
+}
+
+/*
  * Get specified datum from SortTuple (IndexTuple for btree index) list
  *
- * If the first datum is requested (depth == 0), sortTuple->datum1/isnull1
- * will be returned. For other datums, relevant datum will be extracted from
- * sortTuple->tuple.
- *
- * The parameter "useFullKey" is used for scenario of "abbreviated key":
- *   false - get sortTuple->datum1/isnull1 (abbreviated key)
- *   true - get the "full" datum
- * If "abbreviated key" is disabled, useFullKey will be ignored.
+ * Note the function does not check leading sort key (tuple->datum1 and
+ * tuple->isnull), which should be checked in other functions (e.g.
+ * mkqs_compare_datum()).
  *
  * See comparetup_index_btree() for details.
  */
@@ -1984,8 +2018,7 @@ mkqs_get_datum_index_btree(SortTuple *x,
 						   const int depth,
 						   Tuplesortstate *state,
 						   Datum *datum,
-						   bool *isNull,
-						   bool useFullKey)
+						   bool *isNull)
 {
 	TupleDesc	tupDesc;
 	IndexTuple	indexTuple;
@@ -1994,24 +2027,6 @@ mkqs_get_datum_index_btree(SortTuple *x,
 	TuplesortIndexBTreeArg *arg = (TuplesortIndexBTreeArg *) base->arg;
 
 	Assert(state);
-
-	/*
-	 * useFullKey is valid only when depth == 0, because only the first datum
-	 * may be involved to "abbreviated key", so only the first datum need to
-	 * be checked with "full" version.
-	 */
-	AssertImply(useFullKey, depth == 0);
-
-	/*
-	 * When useFullKey is false, and the first datum is requested, return the
-	 * leading datum
-	 */
-	if (depth == 0 && !useFullKey)
-	{
-		*isNull = sortTuple->isnull1;
-		*datum = sortTuple->datum1;
-		return *datum;
-	}
 
 	indexTuple = (IndexTuple) sortTuple->tuple;
 	tupDesc = RelationGetDescr(arg->index.indexRel);
