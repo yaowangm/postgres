@@ -165,16 +165,8 @@ typedef int (*SortTupleComparator) (const SortTuple *a, const SortTuple *b,
 
 /* Multi-key quick sort */
 
-typedef Datum
-			(*MkqsGetDatumFunc) (SortTuple *x,
-								 const int tupleIndex,
-								 const int depth,
-								 Tuplesortstate *state,
-								 Datum *datum,
-								 bool *isNull);
-
 typedef void
-		 (*MkqsGetTwoDatumFunc) (const SortTuple *x1,
+			(*MkqsGetDatumFunc) (const SortTuple *x1,
 								 const SortTuple *x2,
 								 const int depth,
 								 Tuplesortstate *state,
@@ -285,16 +277,10 @@ typedef struct
 	void	   *arg;			/* Specific information for the sort variant */
 
 	/*
-	 * Function pointer, referencing a function to get specified datum from
+	 * Function pointer, referencing a function to get specified datums from
 	 * SortTuple list with multi-key. Used by mk_qsort_tuple().
 	 */
 	MkqsGetDatumFunc mkqsGetDatumFunc;
-
-	/*
-	 * Function pointer, referencing a function to get specified two datums from
-	 * SortTuple list with multi-key. Used by mk_qsort_tuple().
-	 */
-	MkqsGetTwoDatumFunc mkqsGetTwoDatumFunc;
 
 	/*
 	 * Function pointer, referencing a function to handle duplicated tuple

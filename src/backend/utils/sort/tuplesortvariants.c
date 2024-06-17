@@ -93,28 +93,24 @@ static void readtup_datum(Tuplesortstate *state, SortTuple *stup,
 						  LogicalTape *tape, unsigned int len);
 static void freestate_cluster(Tuplesortstate *state);
 
-static Datum mkqs_get_datum_heap(SortTuple *x,
-								 const int tupleIndex,
-								 const int depth,
-								 Tuplesortstate *state,
-								 Datum *datum,
-								 bool *isNull);
+static void mkqs_get_datum_heap(const SortTuple *x1,
+								const SortTuple *x2,
+								const int depth,
+								Tuplesortstate *state,
+								Datum *datum1,
+								bool *isNull1,
+								Datum *datum2,
+								bool *isNull2);
 
-static void mkqs_get_two_datum_heap(const SortTuple *x1,
-									const SortTuple *x2,
-									const int depth,
-									Tuplesortstate *state,
-									Datum *datum1,
-									bool *isNull1,
-									Datum *datum2,
-									bool *isNull2);
-
-static Datum mkqs_get_datum_index_btree(SortTuple *x,
-										const int tupleIndex,
-										const int depth,
-										Tuplesortstate *state,
-										Datum *datum,
-										bool *isNull);
+static void
+mkqs_get_datum_index_btree(const SortTuple *x1,
+						   const SortTuple *x2,
+						   const int depth,
+						   Tuplesortstate *state,
+						   Datum *datum1,
+						   bool *isNull1,
+						   Datum *datum2,
+						   bool *isNull2);
 
 static void
 			mkqs_handle_dup_index_btree(SortTuple *x,
@@ -256,7 +252,6 @@ tuplesort_begin_heap(TupleDesc tupDesc,
 	base->comparetup = comparetup_heap;
 	base->comparetup_tiebreak = comparetup_heap_tiebreak;
 	base->mkqsGetDatumFunc = mkqs_get_datum_heap;
-	base->mkqsGetTwoDatumFunc = mkqs_get_two_datum_heap;
 	base->writetup = writetup_heap;
 	base->readtup = readtup_heap;
 	base->haveDatum1 = true;
@@ -1916,7 +1911,10 @@ readtup_datum(Tuplesortstate *state, SortTuple *stup,
 }
 
 /*
- * Get specified datum from SortTuple (HeapTuple) list
+ * Get specified datums from SortTuple (HeapTuple) list
+ *
+ * When x1 and x2 are provided by caller, two datums will be returned.
+ * When x2 is NULL, only one datum will be returned.
  *
  * Note the function does not check leading sort key (tuple->datum1 and
  * tuple->isnull), which should be checked in other functions (e.g.
@@ -1924,55 +1922,14 @@ readtup_datum(Tuplesortstate *state, SortTuple *stup,
  *
  * See comparetup_heap() for details.
  */
-static Datum
-mkqs_get_datum_heap(SortTuple *x,
-					int tupleIndex,
-					int depth,
-					Tuplesortstate *state,
-					Datum *datum,
-					bool *isNull)
-{
-	TupleDesc	tupDesc = NULL;
-	HeapTupleData heapTuple;
-	AttrNumber	attno;
-	SortTuple  *sortTuple = x + tupleIndex;
-	TuplesortPublic *base = TuplesortstateGetPublic(state);
-	SortSupport sortKey = base->sortKeys + depth;;
-
-	Assert(state);
-
-	tupDesc = (TupleDesc) base->arg;
-
-	/* Extract datum from sortTuple->tuple */
-	extract_heaptuple_from_sorttuple(sortTuple, &heapTuple);
-
-	attno = sortKey->ssup_attno;
-	*datum = heap_getattr(&heapTuple, attno, tupDesc, isNull);
-
-	return *datum;
-}
-
-/*
- * Get two specified datums from SortTuple (HeapTuple) list
- *
- * The function is similar to mkqs_get_datum_heap() except it fetchs two
- * datums rather than one. The weird design is just to void extra perf
- * cost of calling mkqs_get_datum_heap() twice in mk qsort.
- *
- * Note the function does not check leading sort key (tuple->datum1 and
- * tuple->isnull), which should be checked in other functions (e.g.
- * mkqs_compare_datum()).
- *
- * See comparetup_heap() for details.
- */
-static void mkqs_get_two_datum_heap(const SortTuple *x1,
-									const SortTuple *x2,
-									const int depth,
-									Tuplesortstate *state,
-									Datum *datum1,
-									bool *isNull1,
-									Datum *datum2,
-									bool *isNull2)
+static void mkqs_get_datum_heap(const SortTuple *x1,
+								const SortTuple *x2,
+								const int depth,
+								Tuplesortstate *state,
+								Datum *datum1,
+								bool *isNull1,
+								Datum *datum2,
+								bool *isNull2)
 {
 	TupleDesc	tupDesc = NULL;
 	HeapTupleData heapTuple1, heapTuple2;
@@ -1981,16 +1938,20 @@ static void mkqs_get_two_datum_heap(const SortTuple *x1,
 	SortSupport sortKey = base->sortKeys + depth;;
 
 	Assert(state);
+	Assert(x1 != NULL);
 
 	tupDesc = (TupleDesc) base->arg;
+	attno = sortKey->ssup_attno;
 
 	/* Extract datum from sortTuple->tuple */
 	extract_heaptuple_from_sorttuple(x1, &heapTuple1);
-	extract_heaptuple_from_sorttuple(x2, &heapTuple2);
-
-	attno = sortKey->ssup_attno;
 	*datum1 = heap_getattr(&heapTuple1, attno, tupDesc, isNull1);
-	*datum2 = heap_getattr(&heapTuple2, attno, tupDesc, isNull2);
+
+	if (x2 != NULL)
+	{
+		extract_heaptuple_from_sorttuple(x2, &heapTuple2);
+		*datum2 = heap_getattr(&heapTuple2, attno, tupDesc, isNull2);
+	}
 }
 
 static pg_attribute_always_inline void
@@ -2004,7 +1965,10 @@ extract_heaptuple_from_sorttuple(const SortTuple *sortTuple,
 }
 
 /*
- * Get specified datum from SortTuple (IndexTuple for btree index) list
+ * Get specified datums from SortTuple (IndexTuple for btree index) list
+ *
+ * When x1 and x2 are provided by caller, two datums will be returned.
+ * When x2 is NULL, only one datum will be returned.
  *
  * Note the function does not check leading sort key (tuple->datum1 and
  * tuple->isnull), which should be checked in other functions (e.g.
@@ -2012,32 +1976,38 @@ extract_heaptuple_from_sorttuple(const SortTuple *sortTuple,
  *
  * See comparetup_index_btree() for details.
  */
-static Datum
-mkqs_get_datum_index_btree(SortTuple *x,
-						   const int tupleIndex,
+static void
+mkqs_get_datum_index_btree(const SortTuple *x1,
+						   const SortTuple *x2,
 						   const int depth,
 						   Tuplesortstate *state,
-						   Datum *datum,
-						   bool *isNull)
+						   Datum *datum1,
+						   bool *isNull1,
+						   Datum *datum2,
+						   bool *isNull2)
 {
 	TupleDesc	tupDesc;
-	IndexTuple	indexTuple;
-	SortTuple  *sortTuple = x + tupleIndex;
+	IndexTuple	indexTuple1, indexTuple2;
 	TuplesortPublic *base = TuplesortstateGetPublic(state);
 	TuplesortIndexBTreeArg *arg = (TuplesortIndexBTreeArg *) base->arg;
 
 	Assert(state);
+	Assert(x1);
 
-	indexTuple = (IndexTuple) sortTuple->tuple;
 	tupDesc = RelationGetDescr(arg->index.indexRel);
+	indexTuple1 = (IndexTuple) x1->tuple;
 
 	/*
 	 * Set parameter attnum = depth + 1 because attnum starts from 1 but depth
 	 * starts from 0
 	 */
-	*datum = index_getattr(indexTuple, depth + 1, tupDesc, isNull);
+	*datum1 = index_getattr(indexTuple1, depth + 1, tupDesc, isNull1);
 
-	return *datum;
+	if (x2 != NULL)
+	{
+		indexTuple2 = (IndexTuple) x2->tuple;
+		*datum2 = index_getattr(indexTuple2, depth + 1, tupDesc, isNull2);
+	}
 }
 
 /*
