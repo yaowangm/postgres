@@ -420,6 +420,8 @@ extern void tuplesort_restorepos(Tuplesortstate *state);
 
 extern void *tuplesort_readtup_alloc(Tuplesortstate *state, Size tuplen);
 
+extern void tuplesort_set_mkqsApplicable(Tuplesortstate *state,
+										 bool mkqsApplicable);
 
 /* tuplesortvariants.c */
 

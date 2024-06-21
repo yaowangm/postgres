@@ -336,6 +336,9 @@ struct Tuplesortstate
 
 	/* Whether multi-key quick sort is used */
 	bool		mkqsUsed;
+
+	/* Should multi-key quick sort be used? Determined by optimizer. */
+	bool		mkqsApplicable;
 };
 
 /*
@@ -3011,46 +3014,51 @@ tuplesort_sort_memtuples(Tuplesortstate *state)
 	if (state->memtupcount > 1)
 	{
 		/*
-		 * Apply multi-key quick sort when: 1. enable_mk_sort is set 2. There
-		 * are multiple keys available 3. mkqsGetDatumFunc is filled, which
-		 * implies that current tuple type is supported by mk qsort. (By now
-		 * only Heap tuple and Btree Index tuple are supported, and more types
-		 * may be supported in future.)
+		 * Apply multi-key quick sort when:
+		 *  1. enable_mk_sort is set
+		 *  2. There are multiple keys available
+		 *  3. mkqsGetDatumFunc is filled, which implies that current tuple
+		 *     type is supported by mk qsort. (By now only Heap tuple and Btree
+		 *     Index tuple are supported, and more types may be supported in
+		 *     future.)
+		 *  4. The distinct value ratio of first row of sorted tuples must be
+		 *     satisfied, in which scenario mk qsort benefits mostly. See the
+		 *     following comments.
 		 *
 		 * A summary of tuple types supported by mk qsort:
 		 *
-		 * HeapTuple: supported IndexTuple(btree): supported IndexTuple(hash):
-		 * not supported because there is only one key DatumTuple: not
-		 * supported because there is only one key HeapTuple(for cluster): not
-		 * supported yet IndexTuple(gist): not supported yet IndexTuple(brin):
-		 * not supported yet
+		 *  HeapTuple: supported
+		 *  IndexTuple(btree): supportedi
+		 *  IndexTuple(hash): not supported because there is only one key
+		 *  DatumTuple: not supported because there is only one key
+		 *  HeapTuple(for cluster): not supported yet
+		 *  IndexTuple(gist): not supported yet
+		 *  IndexTuple(brin): not supported yet
 		 */
 		if (enable_mk_sort &&
 			state->base.nKeys > 1 &&
-			state->base.mkqsGetDatumFunc != NULL)
+			state->base.mkqsGetDatumFunc != NULL &&
+			state->mkqsApplicable)
 		{
-			state->mkqsUsed = true;
-
 			/*
 			 * Set relevant Datum Sort Comparator according to concrete data type
 			 * of the first sort key
 			 */
-			if (state->base.sortKeys[0].comparator == ssup_datum_unsigned_cmp)
+			if (state->base.haveDatum1)
 			{
-				state->base.mkqsCompFuncType = MKQS_COMP_FUNC_UNSIGNED;
+				if (state->base.sortKeys[0].comparator == ssup_datum_unsigned_cmp)
+					state->base.mkqsCompFuncType = MKQS_COMP_FUNC_UNSIGNED;
+#if SIZEOF_DATUM >= 8
+				else if (state->base.sortKeys[0].comparator == ssup_datum_signed_cmp)
+					state->base.mkqsCompFuncType = MKQS_COMP_FUNC_SIGNED;
+#endif
+				else if (state->base.sortKeys[0].comparator == ssup_datum_int32_cmp)
+					state->base.mkqsCompFuncType = MKQS_COMP_FUNC_INT32;
+				else
+					state->base.mkqsCompFuncType = MKQS_COMP_FUNC_GENERIC;
 			}
-			else if (state->base.sortKeys[0].comparator == ssup_datum_signed_cmp)
-			{
-				state->base.mkqsCompFuncType = MKQS_COMP_FUNC_SIGNED;
-			}
-			else if (state->base.sortKeys[0].comparator == ssup_datum_int32_cmp)
-			{
-				state->base.mkqsCompFuncType = MKQS_COMP_FUNC_INT32;
-			}
-			else
-			{
-				state->base.mkqsCompFuncType = MKQS_COMP_FUNC_GENERIC;
-			}
+
+			state->mkqsUsed = true;
 
 			mk_qsort_tuple(state->memtuples,
 						   state->memtupcount,
@@ -3545,4 +3553,11 @@ ssup_datum_int32_cmp(Datum x, Datum y, SortSupport ssup)
 		return 1;
 	else
 		return 0;
+}
+
+void
+tuplesort_set_mkqsApplicable(Tuplesortstate *state,
+							 bool mkqsApplicable)
+{
+	state->mkqsApplicable = mkqsApplicable;
 }
