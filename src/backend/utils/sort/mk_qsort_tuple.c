@@ -419,6 +419,8 @@ mk_qsort_tuple(SortTuple *x,
 	int32		dist;
 	SortTuple  *pivot;
 	bool		isDatumNull;
+	bool        strictOrdered = true;
+
 
 	Assert(depth <= state->base.nKeys);
 	Assert(state->base.sortKeys);
@@ -435,42 +437,36 @@ mk_qsort_tuple(SortTuple *x,
 
 	/*
 	 * Check if the array is ordered already. If yes, return immediately.
-	 * The check is performed only for the first depth.
 	 *
 	 * Different from qsort_tuple(), the array must be strict ordered (no
 	 * equal datums). If there are equal datums, we must continue the mk qsort
 	 * process to check datums on lower depth.
 	 */
-	if (depth == 0)
+	for (int i = 0; i < n - 1; i++)
 	{
-		bool strictOrdered = true;
+		int ret;
 
-		for (int i = 0; i < n - 1; i++)
+		CHECK_FOR_INTERRUPTS();
+		ret = mkqs_compare_datum(x + i,
+								 x + i + 1,
+								 depth,
+								 state);
+		if (ret >= 0)
 		{
-			int ret;
-
-			CHECK_FOR_INTERRUPTS();
-			ret = mkqs_compare_datum(x + i,
-									 x + i + 1,
-									 depth,
-									 state);
-			if (ret >= 0)
-			{
-				strictOrdered = false;
-				break;
-			}
+			strictOrdered = false;
+			break;
 		}
-
-		if (strictOrdered)
-			return;
 	}
+
+	if (strictOrdered)
+		return;
 
 	/*
 	 * When the count < 16 and no need to handle duplicated tuples, use
 	 * bubble sort.
 	 *
 	 * Use 16 instead of 7 which is used in standard qsort, because mk qsort
-	 * need more cost to calculate median value in get_median_from_three().
+	 * need more cost to maintain more complex state.
 	 *
 	 * Bubble sort is not applicable for scenario of handle duplicated tuples
 	 * because it is difficult to check NULL effectively.

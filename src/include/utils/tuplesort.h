@@ -452,6 +452,8 @@ extern void tuplesort_restorepos(Tuplesortstate *state);
 
 extern void *tuplesort_readtup_alloc(Tuplesortstate *state, Size tuplen);
 
+extern void tuplesort_set_ndistInFirstRow(Tuplesortstate *state,
+										  double ndistInFirstRow);
 
 /* tuplesortvariants.c */
 

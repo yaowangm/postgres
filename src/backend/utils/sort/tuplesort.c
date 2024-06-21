@@ -341,6 +341,12 @@ struct Tuplesortstate
 
 	/* Whether multi-key quick sort is used */
 	bool		mkqsUsed;
+
+	/*
+	 * Indicates distinct value ratio of the first column of
+	 * he tuples to sorted. See details of Sort->ndistInFirstRow.
+	 */
+	double      ndistInFirstRow;
 };
 
 /*
@@ -2729,54 +2735,66 @@ tuplesort_sort_memtuples(Tuplesortstate *state)
 	if (state->memtupcount > 1)
 	{
 		/*
-		 * Apply multi-key quick sort when: 1. enable_mk_sort is set 2. There
-		 * are multiple keys available 3. mkqsGetDatumFunc is filled, which
-		 * implies that current tuple type is supported by mk qsort. (By now
-		 * only Heap tuple and Btree Index tuple are supported, and more types
-		 * may be supported in future.)
+		 * Apply multi-key quick sort when:
+		 *  1. enable_mk_sort is set
+		 *  2. There are multiple keys available
+		 *  3. mkqsGetDatumFunc is filled, which implies that current tuple
+		 *     type is supported by mk qsort. (By now only Heap tuple and Btree
+		 *     Index tuple are supported, and more types may be supported in
+		 *     future.)
+		 *  4. The distinct value ratio of first row of sorted tuples must be
+		 *     satisfied, in which scenario mk qsort benefits mostly. See the
+		 *     following comments.
 		 *
 		 * A summary of tuple types supported by mk qsort:
 		 *
-		 * HeapTuple: supported IndexTuple(btree): supported IndexTuple(hash):
-		 * not supported because there is only one key DatumTuple: not
-		 * supported because there is only one key HeapTuple(for cluster): not
-		 * supported yet IndexTuple(gist): not supported yet IndexTuple(brin):
-		 * not supported yet
+		 *  HeapTuple: supported
+		 *  IndexTuple(btree): supportedi
+		 *  IndexTuple(hash): not supported because there is only one key
+		 *  DatumTuple: not supported because there is only one key
+		 *  HeapTuple(for cluster): not supported yet
+		 *  IndexTuple(gist): not supported yet
+		 *  IndexTuple(brin): not supported yet
 		 */
 		if (enable_mk_sort &&
 			state->base.nKeys > 1 &&
 			state->base.mkqsGetDatumFunc != NULL)
 		{
-			state->mkqsUsed = true;
-
 			/*
 			 * Set relevant Datum Sort Comparator according to concrete data type
 			 * of the first sort key
 			 */
-			if (state->base.sortKeys[0].comparator == ssup_datum_unsigned_cmp)
+			if (state->base.haveDatum1)
 			{
-				state->base.mkqsCompFuncType = MKQS_COMP_FUNC_UNSIGNED;
-			}
-			else if (state->base.sortKeys[0].comparator == ssup_datum_signed_cmp)
-			{
-				state->base.mkqsCompFuncType = MKQS_COMP_FUNC_SIGNED;
-			}
-			else if (state->base.sortKeys[0].comparator == ssup_datum_int32_cmp)
-			{
-				state->base.mkqsCompFuncType = MKQS_COMP_FUNC_INT32;
-			}
-			else
-			{
-				state->base.mkqsCompFuncType = MKQS_COMP_FUNC_GENERIC;
+				if (state->base.sortKeys[0].comparator == ssup_datum_unsigned_cmp)
+					state->base.mkqsCompFuncType = MKQS_COMP_FUNC_UNSIGNED;
+#if SIZEOF_DATUM >= 8
+				else if (state->base.sortKeys[0].comparator == ssup_datum_signed_cmp)
+					state->base.mkqsCompFuncType = MKQS_COMP_FUNC_SIGNED;
+#endif
+				else if (state->base.sortKeys[0].comparator == ssup_datum_int32_cmp)
+					state->base.mkqsCompFuncType = MKQS_COMP_FUNC_INT32;
+				else
+					state->base.mkqsCompFuncType = MKQS_COMP_FUNC_GENERIC;
 			}
 
-			mk_qsort_tuple(state->memtuples,
-						   state->memtupcount,
-						   0,
-						   state,
-						   false);
+			/*
+			 * If there is comparator specialization, the distinct value ratio must
+			 * be smaller than 0.1 to enable mk qsort. It is an experimental value.
+			 */
+			if (state->base.mkqsCompFuncType == MKQS_COMP_FUNC_GENERIC ||
+				state->ndistInFirstRow < 0.1)
+			{
+				state->mkqsUsed = true;
 
-			return;
+				mk_qsort_tuple(state->memtuples,
+							   state->memtupcount,
+							   0,
+							   state,
+							   false);
+
+				return;
+			}
 		}
 
 		/*
@@ -3274,4 +3292,10 @@ ssup_datum_int32_cmp(Datum x, Datum y, SortSupport ssup)
 		return 1;
 	else
 		return 0;
+}
+
+void tuplesort_set_ndistInFirstRow(Tuplesortstate *state,
+								   double ndistInFirstRow)
+{
+	state->ndistInFirstRow = ndistInFirstRow;
 }

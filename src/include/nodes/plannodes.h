@@ -946,6 +946,18 @@ typedef struct Sort
 
 	/* NULLS FIRST/LAST directions */
 	bool	   *nullsFirst pg_node_attr(array_size(numCols));
+
+	/*
+	 * Indicates distinct value ratio of the first column of 
+	 * the tuples to sorted:
+	 *   0 - unknown
+	 *   1 - all distinct
+	 *   eg 0.3 - 30% distinct values
+	 * Note ndistInFirstRow is unavailable if the sort tuples
+	 * are not directly from a real table, and it is not always
+	 * reliable because ANALYZE table is needed for the number.
+	 */
+	double      ndistInFirstRow;
 } Sort;
 
 /* ----------------
