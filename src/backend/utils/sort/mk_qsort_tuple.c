@@ -249,38 +249,26 @@ get_median_from_three(int a,
 
 /*
  * Compare two tuples by starting specified depth till latest depth
- *
- * Caller should guarantee that all datums before specified depth
- * are equal. The function is used by bubble sort in the middle of
- * mk qsort.
  */
 static inline int
-mkqs_compare_tuple_by_range(SortTuple *tuple1,
-							SortTuple *tuple2,
-							int depth,
-							Tuplesortstate *state)
+mkqs_compare_tuple_by_range_tiebreak(SortTuple *tuple1,
+									 SortTuple *tuple2,
+									 int depth,
+									 Tuplesortstate *state)
 {
 	int			ret = 0;
 	Datum		datum1,
 				datum2;
 	bool		isNull1,
 				isNull2;
-	SortSupport sortKey;
-	TuplesortPublic *base = NULL;
+	const MkqsGetDatumFunc getDatumFunc = state->base.mkqsGetDatumFunc;
+	SortSupport sortKey = state->base.sortKeys + depth;
+
+	Assert(getDatumFunc);
+	Assert(depth < state->base.nKeys);
 
 	if (depth == 0)
 	{
-		ret = mkqs_compare_datum_by_shortcut(tuple1, tuple2, state);
-
-		if (ret != 0)
-			return ret;
-
-		base = TuplesortstateGetPublic(state);
-		sortKey = base->sortKeys + depth;
-
-		Assert(base->mkqsGetDatumFunc);
-		Assert(depth < base->nKeys);
-
 		/*
 		 * If "abbreviated key" is enabled, and we are in the first depth, it
 		 * means only "abbreviated keys" was compared. If the two datums were
@@ -290,14 +278,14 @@ mkqs_compare_tuple_by_range(SortTuple *tuple1,
 		 */
 		if (sortKey->abbrev_converter)
 		{
-			base->mkqsGetDatumFunc(tuple1,
-								   tuple2,
-								   depth,
-								   state,
-								   &datum1,
-								   &isNull1,
-								   &datum2,
-								   &isNull2);
+			getDatumFunc(tuple1,
+						 tuple2,
+						 depth,
+						 state,
+						 &datum1,
+						 &isNull1,
+						 &datum2,
+						 &isNull2);
 			ret = ApplySortAbbrevFullComparator(datum1,
 												isNull1,
 												datum2,
@@ -315,28 +303,16 @@ mkqs_compare_tuple_by_range(SortTuple *tuple1,
 		sortKey++;
 	}
 
-	/*
-	 * Init base/sortKey because they may not have been initialized
-	 * if the init depth > 1
-	 */
-	if (base == NULL) {
-		base = TuplesortstateGetPublic(state);
-		sortKey = base->sortKeys + depth;
-
-		Assert(base->mkqsGetDatumFunc);
-		Assert(depth < base->nKeys);
-	}
-
-	while (depth < base->nKeys)
+	while (depth < state->base.nKeys)
 	{
-		base->mkqsGetDatumFunc(tuple1,
-							   tuple2,
-							   depth,
-							   state,
-							   &datum1,
-							   &isNull1,
-							   &datum2,
-							   &isNull2);
+		getDatumFunc(tuple1,
+					 tuple2,
+					 depth,
+					 state,
+					 &datum1,
+					 &isNull1,
+					 &datum2,
+					 &isNull2);
 
 		ret = ApplySortComparator(datum1,
 								  isNull1,
@@ -353,6 +329,45 @@ mkqs_compare_tuple_by_range(SortTuple *tuple1,
 
 	Assert(ret == 0);
 	return 0;
+}
+
+/*
+ * Compare two tuples by starting specified depth till latest depth
+ *
+ * Caller should guarantee that all datums before specified depth
+ * are equal.
+ *
+ * If depth == 0, call mkqs_compare_datum_by_shortcut() to compare
+ * compare leading sort keys. If they are equal, or depth != 0, call
+ * mkqs_compare_tuple_by_range_tiebreak().
+ */
+static inline int
+mkqs_compare_tuple_by_range(SortTuple *tuple1,
+							SortTuple *tuple2,
+							int depth,
+							Tuplesortstate *state)
+{
+	if (depth == 0)
+	{
+		int ret = 0;
+
+		ret = mkqs_compare_datum_by_shortcut(tuple1, tuple2, state);
+
+		if (ret != 0)
+			return ret;
+
+		/*
+		 * No need to check state->base.onlyKey to decide to call the
+		 * tiebreak function like qsort_tuple_unsigned_compare(), 
+		 * because mk qsort has at least two sort keys, i.e. we have
+		 * to call tiebreak function anyway at the time.
+		 */
+	}
+
+	return mkqs_compare_tuple_by_range_tiebreak(tuple1,
+												tuple2,
+												depth,
+												state);
 }
 
 /*
