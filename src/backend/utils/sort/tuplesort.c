@@ -341,6 +341,9 @@ struct Tuplesortstate
 
 	/* Whether multi-key quick sort is used */
 	bool		mkqsUsed;
+
+	/* Should multi-key quick be used or not? Determined by optimizer */
+	bool        mkqsApplicable;
 };
 
 /*
@@ -2736,6 +2739,9 @@ tuplesort_sort_memtuples(Tuplesortstate *state)
 		 *     type is supported by mk qsort. (By now only Heap tuple and Btree
 		 *     Index tuple are supported, and more types may be supported in
 		 *     future.)
+		 *  4. state->mkqsApplicable is true, which is determined by optimizer
+		 *     and means "mk qsort is supposed to be faster than qsort" for
+		 *     current case.
 		 *
 		 * A summary of tuple types supported by mk qsort:
 		 *
@@ -2749,7 +2755,8 @@ tuplesort_sort_memtuples(Tuplesortstate *state)
 		 */
 		if (enable_mk_sort &&
 			state->base.nKeys > 1 &&
-			state->base.mkqsGetDatumFunc != NULL)
+			state->base.mkqsGetDatumFunc != NULL &&
+			state->mkqsApplicable)
 		{
 			/*
 			 * Set relevant Datum Sort Comparator according to concrete data type
@@ -3274,4 +3281,10 @@ ssup_datum_int32_cmp(Datum x, Datum y, SortSupport ssup)
 		return 1;
 	else
 		return 0;
+}
+
+void tuplesort_set_mkqsApplicable(Tuplesortstate *state,
+								  bool mkqsApplicable)
+{
+	state->mkqsApplicable = mkqsApplicable;
 }

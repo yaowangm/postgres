@@ -507,6 +507,8 @@ extern BrinTuple *tuplesort_getbrintuple(Tuplesortstate *state, Size *len,
 										 bool forward);
 extern bool tuplesort_getdatum(Tuplesortstate *state, bool forward, bool copy,
 							   Datum *val, bool *isNull, Datum *abbrev);
+extern void tuplesort_set_mkqsApplicable(Tuplesortstate *state,
+										 bool mkqsApplicable);
 
 
 #endif							/* TUPLESORT_H */

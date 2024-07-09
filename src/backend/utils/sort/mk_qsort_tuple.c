@@ -163,12 +163,14 @@ mkqs_compare_datum_by_shortcut(SortTuple      *tuple1,
 										  tuple2->datum1,
 										  tuple2->isnull1,
 										  sortKey);
+#if SIZEOF_DATUM >= 8
 	else if (compFuncType == MKQS_COMP_FUNC_SIGNED)
 		ret = ApplySignedSortComparator(tuple1->datum1,
 										tuple1->isnull1,
 										tuple2->datum1,
 										tuple2->isnull1,
 										sortKey);
+#endif
 	else if (compFuncType == MKQS_COMP_FUNC_INT32)
 		ret = ApplyInt32SortComparator(tuple1->datum1,
 									   tuple1->isnull1,
@@ -387,8 +389,10 @@ mkqs_compare_tuple(SortTuple *a, SortTuple *b, Tuplesortstate *state)
 
 	if (compFuncType == MKQS_COMP_FUNC_UNSIGNED)
 		ret = qsort_tuple_unsigned_compare(a, b, state);
+#if SIZEOF_DATUM >= 8
 	else if (compFuncType == MKQS_COMP_FUNC_SIGNED)
 		ret = qsort_tuple_signed_compare(a, b, state);
+#endif
 	else if (compFuncType == MKQS_COMP_FUNC_INT32)
 		ret = qsort_tuple_int32_compare(a, b, state);
 	else

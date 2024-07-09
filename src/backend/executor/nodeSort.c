@@ -122,6 +122,8 @@ ExecSort(PlanState *pstate)
 												  tuplesortopts);
 		if (node->bounded)
 			tuplesort_set_bound(tuplesortstate, node->bound);
+		tuplesort_set_mkqsApplicable(tuplesortstate,
+									 plannode->mkqsApplicable);
 		node->tuplesortstate = (void *) tuplesortstate;
 
 		/*

@@ -946,6 +946,9 @@ typedef struct Sort
 
 	/* NULLS FIRST/LAST directions */
 	bool	   *nullsFirst pg_node_attr(array_size(numCols));
+
+	/* Should multi-key quick be used or not? Determined by optimizer */
+	bool        mkqsApplicable;
 } Sort;
 
 /* ----------------
