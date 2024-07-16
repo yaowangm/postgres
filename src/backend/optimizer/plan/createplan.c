@@ -42,6 +42,8 @@
 #include "parser/parsetree.h"
 #include "partitioning/partprune.h"
 #include "utils/lsyscache.h"
+#include "utils/syscache.h"
+#include "catalog/pg_statistic.h"
 
 
 /*
@@ -256,12 +258,14 @@ static MergeJoin *make_mergejoin(List *tlist,
 								 bool skip_mark_restore);
 static Sort *make_sort(Plan *lefttree, int numCols,
 					   AttrNumber *sortColIdx, Oid *sortOperators,
-					   Oid *collations, bool *nullsFirst);
+					   Oid *collations, bool *nullsFirst,
+					   bool mkqsApplicable);
 static IncrementalSort *make_incrementalsort(Plan *lefttree,
 											 int numCols, int nPresortedCols,
 											 AttrNumber *sortColIdx, Oid *sortOperators,
 											 Oid *collations, bool *nullsFirst);
-static Plan *prepare_sort_from_pathkeys(Plan *lefttree, List *pathkeys,
+static Plan *prepare_sort_from_pathkeys(PlannerInfo *root,
+										Plan *lefttree, List *pathkeys,
 										Relids relids,
 										const AttrNumber *reqColIdx,
 										bool adjust_tlist_in_place,
@@ -269,8 +273,9 @@ static Plan *prepare_sort_from_pathkeys(Plan *lefttree, List *pathkeys,
 										AttrNumber **p_sortColIdx,
 										Oid **p_sortOperators,
 										Oid **p_collations,
-										bool **p_nullsFirst);
-static Sort *make_sort_from_pathkeys(Plan *lefttree, List *pathkeys,
+										bool **p_nullsFirst,
+										bool *mkqsApplicable);
+static Sort *make_sort_from_pathkeys(PlannerInfo *root, Plan *lefttree, List *pathkeys,
 									 Relids relids);
 static IncrementalSort *make_incrementalsort_from_pathkeys(Plan *lefttree,
 														   List *pathkeys, Relids relids, int nPresortedCols);
@@ -1282,7 +1287,8 @@ create_append_plan(PlannerInfo *root, AppendPath *best_path, int flags)
 		 * function result; it must be the same plan node.  However, we then
 		 * need to detect whether any tlist entries were added.
 		 */
-		(void) prepare_sort_from_pathkeys((Plan *) plan, pathkeys,
+		(void) prepare_sort_from_pathkeys(NULL,
+										  (Plan *) plan, pathkeys,
 										  best_path->path.parent->relids,
 										  NULL,
 										  true,
@@ -1290,7 +1296,8 @@ create_append_plan(PlannerInfo *root, AppendPath *best_path, int flags)
 										  &nodeSortColIdx,
 										  &nodeSortOperators,
 										  &nodeCollations,
-										  &nodeNullsFirst);
+										  &nodeNullsFirst,
+										  NULL);
 		tlist_was_changed = (orig_tlist_length != list_length(plan->plan.targetlist));
 	}
 
@@ -1326,7 +1333,8 @@ create_append_plan(PlannerInfo *root, AppendPath *best_path, int flags)
 			 * don't need an explicit sort, to make sure they are returning
 			 * the same sort key columns the Append expects.
 			 */
-			subplan = prepare_sort_from_pathkeys(subplan, pathkeys,
+			subplan = prepare_sort_from_pathkeys(NULL,
+												 subplan, pathkeys,
 												 subpath->parent->relids,
 												 nodeSortColIdx,
 												 false,
@@ -1334,7 +1342,8 @@ create_append_plan(PlannerInfo *root, AppendPath *best_path, int flags)
 												 &sortColIdx,
 												 &sortOperators,
 												 &collations,
-												 &nullsFirst);
+												 &nullsFirst,
+												 NULL);
 
 			/*
 			 * Check that we got the same sort key information.  We just
@@ -1358,7 +1367,8 @@ create_append_plan(PlannerInfo *root, AppendPath *best_path, int flags)
 			{
 				Sort	   *sort = make_sort(subplan, numsortkeys,
 											 sortColIdx, sortOperators,
-											 collations, nullsFirst);
+											 collations, nullsFirst,
+											 NULL);
 
 				label_sort_with_costsize(root, sort, best_path->limit_tuples);
 				subplan = (Plan *) sort;
@@ -1467,7 +1477,8 @@ create_merge_append_plan(PlannerInfo *root, MergeAppendPath *best_path,
 	 * function result; it must be the same plan node.  However, we then need
 	 * to detect whether any tlist entries were added.
 	 */
-	(void) prepare_sort_from_pathkeys(plan, pathkeys,
+	(void) prepare_sort_from_pathkeys(NULL,
+									  plan, pathkeys,
 									  best_path->path.parent->relids,
 									  NULL,
 									  true,
@@ -1475,7 +1486,8 @@ create_merge_append_plan(PlannerInfo *root, MergeAppendPath *best_path,
 									  &node->sortColIdx,
 									  &node->sortOperators,
 									  &node->collations,
-									  &node->nullsFirst);
+									  &node->nullsFirst,
+									  NULL);
 	tlist_was_changed = (orig_tlist_length != list_length(plan->targetlist));
 
 	/*
@@ -1498,7 +1510,8 @@ create_merge_append_plan(PlannerInfo *root, MergeAppendPath *best_path,
 		subplan = create_plan_recurse(root, subpath, CP_EXACT_TLIST);
 
 		/* Compute sort column info, and adjust subplan's tlist as needed */
-		subplan = prepare_sort_from_pathkeys(subplan, pathkeys,
+		subplan = prepare_sort_from_pathkeys(NULL,
+											 subplan, pathkeys,
 											 subpath->parent->relids,
 											 node->sortColIdx,
 											 false,
@@ -1506,7 +1519,8 @@ create_merge_append_plan(PlannerInfo *root, MergeAppendPath *best_path,
 											 &sortColIdx,
 											 &sortOperators,
 											 &collations,
-											 &nullsFirst);
+											 &nullsFirst,
+											 NULL);
 
 		/*
 		 * Check that we got the same sort key information.  We just Assert
@@ -1530,7 +1544,8 @@ create_merge_append_plan(PlannerInfo *root, MergeAppendPath *best_path,
 		{
 			Sort	   *sort = make_sort(subplan, numsortkeys,
 										 sortColIdx, sortOperators,
-										 collations, nullsFirst);
+										 collations, nullsFirst,
+										 NULL);
 
 			label_sort_with_costsize(root, sort, best_path->limit_tuples);
 			subplan = (Plan *) sort;
@@ -1977,7 +1992,8 @@ create_gather_merge_plan(PlannerInfo *root, GatherMergePath *best_path)
 	Assert(pathkeys != NIL);
 
 	/* Compute sort column info, and adjust subplan's tlist as needed */
-	subplan = prepare_sort_from_pathkeys(subplan, pathkeys,
+	subplan = prepare_sort_from_pathkeys(NULL,
+										 subplan, pathkeys,
 										 best_path->subpath->parent->relids,
 										 gm_plan->sortColIdx,
 										 false,
@@ -1985,7 +2001,8 @@ create_gather_merge_plan(PlannerInfo *root, GatherMergePath *best_path)
 										 &gm_plan->sortColIdx,
 										 &gm_plan->sortOperators,
 										 &gm_plan->collations,
-										 &gm_plan->nullsFirst);
+										 &gm_plan->nullsFirst,
+										 NULL);
 
 
 	/*
@@ -2196,7 +2213,7 @@ create_sort_plan(PlannerInfo *root, SortPath *best_path, int flags)
 	 * relids. Thus, if this sort path is based on a child relation, we must
 	 * pass its relids.
 	 */
-	plan = make_sort_from_pathkeys(subplan, best_path->path.pathkeys,
+	plan = make_sort_from_pathkeys(root, subplan, best_path->path.pathkeys,
 								   IS_OTHER_REL(best_path->subpath->parent) ?
 								   best_path->path.parent->relids : NULL);
 
@@ -4526,7 +4543,7 @@ create_mergejoin_plan(PlannerInfo *root,
 	if (best_path->outersortkeys)
 	{
 		Relids		outer_relids = outer_path->parent->relids;
-		Sort	   *sort = make_sort_from_pathkeys(outer_plan,
+		Sort	   *sort = make_sort_from_pathkeys(NULL, outer_plan,
 												   best_path->outersortkeys,
 												   outer_relids);
 
@@ -4540,7 +4557,7 @@ create_mergejoin_plan(PlannerInfo *root,
 	if (best_path->innersortkeys)
 	{
 		Relids		inner_relids = inner_path->parent->relids;
-		Sort	   *sort = make_sort_from_pathkeys(inner_plan,
+		Sort	   *sort = make_sort_from_pathkeys(NULL, inner_plan,
 												   best_path->innersortkeys,
 												   inner_relids);
 
@@ -6067,7 +6084,8 @@ make_mergejoin(List *tlist,
 static Sort *
 make_sort(Plan *lefttree, int numCols,
 		  AttrNumber *sortColIdx, Oid *sortOperators,
-		  Oid *collations, bool *nullsFirst)
+		  Oid *collations, bool *nullsFirst,
+		  bool mkqsApplicable)
 {
 	Sort	   *node;
 	Plan	   *plan;
@@ -6084,6 +6102,7 @@ make_sort(Plan *lefttree, int numCols,
 	node->sortOperators = sortOperators;
 	node->collations = collations;
 	node->nullsFirst = nullsFirst;
+	node->mkqsApplicable = mkqsApplicable;
 
 	return node;
 }
@@ -6161,7 +6180,8 @@ make_incrementalsort(Plan *lefttree, int numCols, int nPresortedCols,
  * or a Result stacked atop lefttree).
  */
 static Plan *
-prepare_sort_from_pathkeys(Plan *lefttree, List *pathkeys,
+prepare_sort_from_pathkeys(PlannerInfo *root,
+						   Plan *lefttree, List *pathkeys,
 						   Relids relids,
 						   const AttrNumber *reqColIdx,
 						   bool adjust_tlist_in_place,
@@ -6169,7 +6189,8 @@ prepare_sort_from_pathkeys(Plan *lefttree, List *pathkeys,
 						   AttrNumber **p_sortColIdx,
 						   Oid **p_sortOperators,
 						   Oid **p_collations,
-						   bool **p_nullsFirst)
+						   bool **p_nullsFirst,
+						   bool *mkqsApplicable)
 {
 	List	   *tlist = lefttree->targetlist;
 	ListCell   *i;
@@ -6179,6 +6200,33 @@ prepare_sort_from_pathkeys(Plan *lefttree, List *pathkeys,
 	Oid		   *collations;
 	bool	   *nullsFirst;
 
+	/* Calculation of benefit from multi-key qsort
+	 *
+	 * The algorithm is:
+	 *
+	 *   mkqsBene = (sum of benefit of each sort key) - fixed cost
+	 *   (sum of benefit of each sort key) =
+	 *                 weight * (duplicated value ratio of previous sort key)
+	 *
+	 * We get the duplicated value ratio from catalog table (pg_statistic.
+	 * stadistinct), which is not always correct.
+	 * In addition, the value might be unavailable sometimes because the sort
+	 * key is not from a real table or the query to catalog table fails. For
+	 * the case, we simply ignore the sort key for calcaulation.
+	 *
+	 * Enable mk qsort only when estimated benefit >= 0.05, which means
+	 * "mk qsort is supposed to be 5% faster than classical qsort".
+	 */
+
+	/* Set mkqsBene to -0.02 to indicate the fixed cost */
+	double		mkqsBene = -0.02;
+
+	/*
+	 * Duplicated value ratio of previous sort key, init to 1.0 for first sort
+	 * key to indicate "count all value"
+	 */
+	double      dupRio = 1.0;
+
 	/*
 	 * We will need at most list_length(pathkeys) sort columns; possibly less
 	 */
@@ -6187,6 +6235,9 @@ prepare_sort_from_pathkeys(Plan *lefttree, List *pathkeys,
 	sortOperators = (Oid *) palloc(numsortkeys * sizeof(Oid));
 	collations = (Oid *) palloc(numsortkeys * sizeof(Oid));
 	nullsFirst = (bool *) palloc(numsortkeys * sizeof(bool));
+
+	if (mkqsApplicable)
+		*mkqsApplicable = false;
 
 	numsortkeys = 0;
 
@@ -6199,6 +6250,9 @@ prepare_sort_from_pathkeys(Plan *lefttree, List *pathkeys,
 		Oid			pk_datatype = InvalidOid;
 		Oid			sortop;
 		ListCell   *j;
+
+		/* Init value of ndist to -1 to indicate "unknown" */
+		double ndist = -1;
 
 		if (ec->ec_has_volatile)
 		{
@@ -6303,6 +6357,54 @@ prepare_sort_from_pathkeys(Plan *lefttree, List *pathkeys,
 			lefttree->targetlist = tlist;	/* just in case NIL before */
 		}
 
+		/* Get the ndist value from pg_stats */
+		if (mkqsApplicable && root != NULL)
+		{
+			/*
+			 * Calculate ndist only when SORT is based on a real table
+			 */
+			if (IsA(tle->expr, Var))
+			{
+				Var *var = (Var *)tle->expr;
+				RangeTblEntry *rte = root->simple_rte_array[var->varno];
+
+				/*
+				 * Try to get distinct info from pg_statistic
+				 */
+
+				if (rte)
+				{
+					HeapTuple tuple = SearchSysCache3(
+												STATRELATTINH,
+												ObjectIdGetDatum(rte->relid),
+												Int16GetDatum(var->varattno),
+												BoolGetDatum(false));
+    	        	if (HeapTupleIsValid(tuple))
+					{
+						/* Use the pg_statistic entry */
+						Form_pg_statistic stats;
+
+						stats = (Form_pg_statistic) GETSTRUCT(tuple);
+						/*
+						 * If stats->stadistinct < 0, it means a fraction of 
+						 * distinct tuple ratio; if it > 0, it means the number
+						 * of distinct tuples; 0 means "unknown".
+						 */
+						if (stats->stadistinct < 0)
+							ndist = -stats->stadistinct;
+						else
+						{
+							RelOptInfo *rel = root->simple_rel_array[var->varno];
+							ndist = stats->stadistinct / rel->tuples;
+						}
+					}
+
+					if (tuple)
+						ReleaseSysCache(tuple);
+				}
+			}
+		}
+
 		/*
 		 * Look up the correct sort operator from the PathKey's slightly
 		 * abstracted representation.
@@ -6321,6 +6423,61 @@ prepare_sort_from_pathkeys(Plan *lefttree, List *pathkeys,
 		sortOperators[numsortkeys] = sortop;
 		collations[numsortkeys] = ec->ec_collation;
 		nullsFirst[numsortkeys] = pathkey->pk_nulls_first;
+
+		/*
+		 * If ndist is valid, calculate benefit for mk qsort
+		 */
+		if (ndist != -1)
+		{
+			double bene = 0;
+			SortSupportData sortKey;
+
+			sortKey.comparator = NULL;
+			sortKey.ssup_cxt = CurrentMemoryContext;
+			sortKey.ssup_collation = collations[numsortkeys];
+			sortKey.ssup_nulls_first = nullsFirst[numsortkeys];
+			sortKey.ssup_attno = sortColIdx[numsortkeys];
+			PrepareSortSupportFromOrderingOp(sortop, &sortKey);
+
+			/*
+			 * For data type with/without specialized comparator, use different
+			 * weights. The weights are determined by some experiments and may
+			 * be not accurate for all possible cases.
+			 */
+			if (sortKey.comparator == ssup_datum_unsigned_cmp ||
+#if SIZEOF_DATUM >= 8
+				sortKey.comparator == ssup_datum_signed_cmp ||
+#endif
+				sortKey.comparator == ssup_datum_int32_cmp)
+			{
+				/*
+				 * For data type with specialized comparator, ignore the first
+				 * sort key because there is no benefit from duplciated values
+				 * for first sort key.
+				 */
+				if (numsortkeys > 0)
+					bene += dupRio * 0.05;
+			}
+			else
+			{
+				/*
+				 * For data type without specialized comparator, mksort is
+				 * faster than classical qsort even there is no duplicate. So
+				 * add 1 to dupRio for the extra benefit from no-duplicate
+				 * values.
+				 */
+				bene += (dupRio + 1) * 0.05;
+			}
+			mkqsBene += bene;
+		}
+
+		/*
+		 * Remember duplicated value ratio of current sort key for
+		 * calculation by next sort key
+		 */
+		if (ndist != -1)
+			dupRio *= (1 - ndist);
+
 		numsortkeys++;
 	}
 
@@ -6330,6 +6487,13 @@ prepare_sort_from_pathkeys(Plan *lefttree, List *pathkeys,
 	*p_sortOperators = sortOperators;
 	*p_collations = collations;
 	*p_nullsFirst = nullsFirst;
+
+	/* Enable mk qsort only when estimated benefit >= 0.05 */
+	if (mkqsBene >= 0.05)
+	{
+		Assert(mkqsApplicable);
+		*mkqsApplicable = true;
+	}
 
 	return lefttree;
 }
@@ -6343,16 +6507,19 @@ prepare_sort_from_pathkeys(Plan *lefttree, List *pathkeys,
  *	  'relids' is the set of relations required by prepare_sort_from_pathkeys()
  */
 static Sort *
-make_sort_from_pathkeys(Plan *lefttree, List *pathkeys, Relids relids)
+make_sort_from_pathkeys(PlannerInfo *root, Plan *lefttree,
+						List *pathkeys, Relids relids)
 {
 	int			numsortkeys;
 	AttrNumber *sortColIdx;
 	Oid		   *sortOperators;
 	Oid		   *collations;
 	bool	   *nullsFirst;
+	bool        mkqsApplicable;
 
 	/* Compute sort column info, and adjust lefttree as needed */
-	lefttree = prepare_sort_from_pathkeys(lefttree, pathkeys,
+	lefttree = prepare_sort_from_pathkeys(root,
+										  lefttree, pathkeys,
 										  relids,
 										  NULL,
 										  false,
@@ -6360,12 +6527,13 @@ make_sort_from_pathkeys(Plan *lefttree, List *pathkeys, Relids relids)
 										  &sortColIdx,
 										  &sortOperators,
 										  &collations,
-										  &nullsFirst);
+										  &nullsFirst,
+										  &mkqsApplicable);
 
 	/* Now build the Sort node */
 	return make_sort(lefttree, numsortkeys,
 					 sortColIdx, sortOperators,
-					 collations, nullsFirst);
+					 collations, nullsFirst, mkqsApplicable);
 }
 
 /*
@@ -6388,7 +6556,8 @@ make_incrementalsort_from_pathkeys(Plan *lefttree, List *pathkeys,
 	bool	   *nullsFirst;
 
 	/* Compute sort column info, and adjust lefttree as needed */
-	lefttree = prepare_sort_from_pathkeys(lefttree, pathkeys,
+	lefttree = prepare_sort_from_pathkeys(NULL,
+										  lefttree, pathkeys,
 										  relids,
 										  NULL,
 										  false,
@@ -6396,7 +6565,8 @@ make_incrementalsort_from_pathkeys(Plan *lefttree, List *pathkeys,
 										  &sortColIdx,
 										  &sortOperators,
 										  &collations,
-										  &nullsFirst);
+										  &nullsFirst,
+										  NULL);
 
 	/* Now build the Sort node */
 	return make_incrementalsort(lefttree, numsortkeys, nPresortedCols,
@@ -6444,7 +6614,8 @@ make_sort_from_sortclauses(List *sortcls, Plan *lefttree)
 
 	return make_sort(lefttree, numsortkeys,
 					 sortColIdx, sortOperators,
-					 collations, nullsFirst);
+					 collations, nullsFirst,
+					 NULL);
 }
 
 /*
@@ -6498,7 +6669,8 @@ make_sort_from_groupcols(List *groupcls,
 
 	return make_sort(lefttree, numsortkeys,
 					 sortColIdx, sortOperators,
-					 collations, nullsFirst);
+					 collations, nullsFirst,
+					 NULL);
 }
 
 static Material *

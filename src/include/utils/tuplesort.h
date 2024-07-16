@@ -29,7 +29,6 @@
 #include "utils/relcache.h"
 #include "utils/sortsupport.h"
 
-
 /*
  * Tuplesortstate and Sharedsort are opaque types whose details are not
  * known outside tuplesort.c.
@@ -79,15 +78,24 @@ typedef enum
 	SORT_TYPE_QUICKSORT = 1 << 1,
 	SORT_TYPE_EXTERNAL_SORT = 1 << 2,
 	SORT_TYPE_EXTERNAL_MERGE = 1 << 3,
+	SORT_TYPE_MK_QSORT = 1 << 4,
 } TuplesortMethod;
 
-#define NUM_TUPLESORTMETHODS 4
+#define NUM_TUPLESORTMETHODS 5
 
 typedef enum
 {
 	SORT_SPACE_TYPE_DISK,
 	SORT_SPACE_TYPE_MEMORY,
 } TuplesortSpaceType;
+
+typedef enum
+{
+	MKQS_COMP_FUNC_GENERIC,
+	MKQS_COMP_FUNC_UNSIGNED,
+	MKQS_COMP_FUNC_SIGNED,
+	MKQS_COMP_FUNC_INT32
+} MkqsCompFuncType;
 
 /* Bitwise option flags for tuple sorts */
 #define TUPLESORT_NONE					0
@@ -154,6 +162,24 @@ typedef struct
 
 typedef int (*SortTupleComparator) (const SortTuple *a, const SortTuple *b,
 									Tuplesortstate *state);
+
+/* Multi-key quick sort */
+
+typedef void
+			(*MkqsGetDatumFunc) (const SortTuple *x1,
+								 const SortTuple *x2,
+								 const int depth,
+								 Tuplesortstate *state,
+								 Datum *datum1,
+								 bool *isNull1,
+								 Datum *datum2,
+								 bool *isNull2);
+
+typedef void
+			(*MkqsHandleDupFunc) (SortTuple *x,
+								  const int tupleCount,
+								  const bool seenNull,
+								  Tuplesortstate *state);
 
 /*
  * The public part of a Tuple sort operation state.  This data structure
@@ -249,6 +275,21 @@ typedef struct
 	bool		tuples;			/* Can SortTuple.tuple ever be set? */
 
 	void	   *arg;			/* Specific information for the sort variant */
+
+	/*
+	 * Function pointer, referencing a function to get specified datums from
+	 * SortTuple list with multi-key. Used by mk_qsort_tuple().
+	 */
+	MkqsGetDatumFunc mkqsGetDatumFunc;
+
+	/*
+	 * Function pointer, referencing a function to handle duplicated tuple
+	 * from SortTuple list with multi-key. Used by mk_qsort_tuple(). For now,
+	 * the function pointer is filled for only btree index tuple.
+	 */
+	MkqsHandleDupFunc mkqsHandleDupFunc;
+
+	MkqsCompFuncType mkqsCompFuncType;
 } TuplesortPublic;
 
 /* Sort parallel code from state for sort__start probes */
@@ -411,7 +452,6 @@ extern void tuplesort_restorepos(Tuplesortstate *state);
 
 extern void *tuplesort_readtup_alloc(Tuplesortstate *state, Size tuplen);
 
-
 /* tuplesortvariants.c */
 
 extern Tuplesortstate *tuplesort_begin_heap(TupleDesc tupDesc,
@@ -467,6 +507,8 @@ extern BrinTuple *tuplesort_getbrintuple(Tuplesortstate *state, Size *len,
 										 bool forward);
 extern bool tuplesort_getdatum(Tuplesortstate *state, bool forward, bool copy,
 							   Datum *val, bool *isNull, Datum *abbrev);
+extern void tuplesort_set_mkqsApplicable(Tuplesortstate *state,
+										 bool mkqsApplicable);
 
 
 #endif							/* TUPLESORT_H */
