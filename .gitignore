@@ -25,6 +25,10 @@ objfiles.txt
 lcov*.info
 coverage/
 coverage-html-stamp
+cscope.files
+cscope.in.out
+cscope.out
+cscope.po.out
 *.vcproj
 *.vcxproj
 win32ver.rc

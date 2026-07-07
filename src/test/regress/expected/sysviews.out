@@ -240,3 +240,4 @@ select * from pg_timezone_abbrevs where abbrev = 'LMT';
 --------+-------------------------------+--------
  LMT    | @ 7 hours 52 mins 58 secs ago | f
 (1 row)
+

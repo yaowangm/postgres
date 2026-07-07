@@ -157,45 +157,13 @@ mkqs_compare_datum_by_shortcut(SortTuple      *tuple1,
 							   SortTuple      *tuple2,
 							   Tuplesortstate *state)
 {
-	int ret = 0;
-	MkqsCompFuncType compFuncType = state->base.mkqsCompFuncType;
 	SortSupport sortKey = &state->base.sortKeys[0];
 
-	if (compFuncType == MKQS_COMP_FUNC_UNSIGNED)
-	{
-		ret = ApplyUnsignedSortComparator(tuple1->datum1,
-										  tuple1->isnull1,
-										  tuple2->datum1,
-										  tuple2->isnull1,
-										  sortKey);
-	}
-	else if (compFuncType == MKQS_COMP_FUNC_SIGNED)
-	{
-		ret = ApplySignedSortComparator(tuple1->datum1,
-										tuple1->isnull1,
-										tuple2->datum1,
-										tuple2->isnull1,
-										sortKey);
-	}
-	else if (compFuncType == MKQS_COMP_FUNC_INT32)
-	{
-		ret = ApplyInt32SortComparator(tuple1->datum1,
-									   tuple1->isnull1,
-									   tuple2->datum1,
-									   tuple2->isnull1,
-									   sortKey);
-	}
-	else
-	{
-		Assert(compFuncType == MKQS_COMP_FUNC_GENERIC);
-		ret = ApplySortComparator(tuple1->datum1,
-								  tuple1->isnull1,
-								  tuple2->datum1,
-								  tuple2->isnull1,
-								  sortKey);
-	}
-
-	return ret;
+	return ApplySortComparator(tuple1->datum1,
+							   tuple1->isnull1,
+							   tuple2->datum1,
+							   tuple2->isnull1,
+							   sortKey);
 }
 
 /*
