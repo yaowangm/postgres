@@ -2666,7 +2666,7 @@ normalize_datum(Datum orig, SortSupport ssup)
  */
 static void
 radix_sort_recursive(SortTuple *begin, size_t n_elems, int level,
-					 Tuplesortstate *state)
+					 Tuplesortstate *state, bool use_mksort_tiebreak)
 {
 	RadixSortInfo partitions[256] = {0};
 	uint8		remaining_partitions[256];
@@ -2821,9 +2821,10 @@ radix_sort_recursive(SortTuple *begin, size_t n_elems, int level,
 				else
 				{
 					radix_sort_recursive(partition_begin,
-										 num_elements,
-										 next_level,
-										 state);
+									 num_elements,
+									 next_level,
+									 state,
+									 use_mksort_tiebreak);
 				}
 			}
 			else if (state->base.onlyKey == NULL)
@@ -2833,10 +2834,17 @@ radix_sort_recursive(SortTuple *begin, size_t n_elems, int level,
 				 * datum (possibly abbreviated), now sort using the tiebreak
 				 * comparator.
 				 */
-				qsort_tuple(partition_begin,
-							num_elements,
-							state->base.comparetup_tiebreak,
-							state);
+				if (use_mksort_tiebreak)
+					mk_qsort_tuple(partition_begin,
+							   num_elements,
+							   1,
+							   state,
+							   false);
+				else
+					qsort_tuple(partition_begin,
+								num_elements,
+								state->base.comparetup_tiebreak,
+								state);
 			}
 		}
 
@@ -2852,7 +2860,8 @@ radix_sort_recursive(SortTuple *begin, size_t n_elems, int level,
  * radix sort on the NOT NULL partition if it's large enough.
  */
 static void
-radix_sort_tuple(SortTuple *data, size_t n, Tuplesortstate *state)
+radix_sort_tuple(SortTuple *data, size_t n, Tuplesortstate *state,
+				 bool use_mksort_tiebreak)
 {
 	bool		nulls_first = state->base.sortKeys[0].ssup_nulls_first;
 	SortTuple  *null_start;
@@ -2943,10 +2952,17 @@ radix_sort_tuple(SortTuple *data, size_t n, Tuplesortstate *state)
 	 */
 	if (state->base.onlyKey == NULL && null_count > 1)
 	{
-		qsort_tuple(null_start,
-					null_count,
-					state->base.comparetup_tiebreak,
-					state);
+		if (use_mksort_tiebreak)
+			mk_qsort_tuple(null_start,
+					   null_count,
+					   1,
+					   state,
+					   true);
+		else
+			qsort_tuple(null_start,
+						null_count,
+						state->base.comparetup_tiebreak,
+						state);
 	}
 
 	/*
@@ -2982,9 +2998,10 @@ radix_sort_tuple(SortTuple *data, size_t n, Tuplesortstate *state)
 		else
 		{
 			radix_sort_recursive(not_null_start,
-								 not_null_count,
-								 0,
-								 state);
+							 not_null_count,
+							 0,
+							 state,
+							 use_mksort_tiebreak);
 		}
 	}
 }
@@ -3060,11 +3077,22 @@ tuplesort_sort_memtuples(Tuplesortstate *state)
 					state->base.mkqsCompFuncType = MKQS_COMP_FUNC_GENERIC;
 			}
 
-			mk_qsort_tuple(state->memtuples,
-						   state->memtupcount,
-						   0,
-						   state,
-						   false);
+			if (state->memtupcount >= QSORT_THRESHOLD &&
+				state->base.mkqsCompFuncType != MKQS_COMP_FUNC_GENERIC &&
+				state->base.sortKeys[0].abbrev_converter == NULL)
+			{
+				radix_sort_tuple(state->memtuples,
+							 state->memtupcount,
+							 state,
+							 true);
+				verify_memtuples_sorted(state);
+			}
+			else
+				mk_qsort_tuple(state->memtuples,
+							   state->memtupcount,
+							   0,
+							   state,
+							   false);
 
 			return;
 		}
@@ -3084,8 +3112,9 @@ tuplesort_sort_memtuples(Tuplesortstate *state)
 				 ssup->comparator == ssup_datum_int32_cmp))
 			{
 				radix_sort_tuple(state->memtuples,
-								 state->memtupcount,
-								 state);
+							 state->memtupcount,
+							 state,
+							 false);
 				verify_memtuples_sorted(state);
 				return;
 			}

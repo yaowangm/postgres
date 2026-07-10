@@ -74,6 +74,69 @@ check_datum_null(SortTuple *x,
 	return isNull;
 }
 
+static inline int
+mkqs_apply_sort_comparator(Datum datum1,
+						   bool isNull1,
+						   Datum datum2,
+						   bool isNull2,
+						   SortSupport sortKey)
+{
+	int			ret;
+
+	if (isNull1)
+	{
+		if (isNull2)
+			return 0;
+		else if (sortKey->ssup_nulls_first)
+			return -1;
+		else
+			return 1;
+	}
+	else if (isNull2)
+	{
+		if (sortKey->ssup_nulls_first)
+			return 1;
+		else
+			return -1;
+	}
+
+#if SIZEOF_DATUM >= 8
+	if (sortKey->comparator == ssup_datum_signed_cmp)
+	{
+		int64		value1 = DatumGetInt64(datum1);
+		int64		value2 = DatumGetInt64(datum2);
+
+		ret = (value1 > value2) - (value1 < value2);
+	}
+	else if (sortKey->comparator == ssup_datum_unsigned_cmp)
+	{
+		uint64		value1 = DatumGetUInt64(datum1);
+		uint64		value2 = DatumGetUInt64(datum2);
+
+		ret = (value1 > value2) - (value1 < value2);
+	}
+	else
+#endif
+	if (sortKey->comparator == ssup_datum_int32_cmp)
+	{
+		int32		value1 = DatumGetInt32(datum1);
+		int32		value2 = DatumGetInt32(datum2);
+
+		ret = (value1 > value2) - (value1 < value2);
+	}
+	else
+		return ApplySortComparator(datum1,
+								   isNull1,
+								   datum2,
+								   isNull2,
+								   sortKey);
+
+	if (sortKey->ssup_reverse)
+		INVERT_COMPARE_RESULT(ret);
+
+	return ret;
+}
+
 /*
  * Compare two tuples at specified depth
  *
@@ -135,11 +198,11 @@ mkqs_compare_datum_tiebreak(SortTuple *tuple1,
 	}
 	else
 	{
-		ret = ApplySortComparator(datum1,
-								  isNull1,
-								  datum2,
-								  isNull2,
-								  sortKey);
+		ret = mkqs_apply_sort_comparator(datum1,
+									  isNull1,
+									  datum2,
+									  isNull2,
+									  sortKey);
 
 	}
 
@@ -359,11 +422,11 @@ mkqs_compare_tuple_by_range(SortTuple *tuple1,
 							   &datum2,
 							   &isNull2);
 
-		ret = ApplySortComparator(datum1,
-								  isNull1,
-								  datum2,
-								  isNull2,
-								  sortKey);
+		ret = mkqs_apply_sort_comparator(datum1,
+									  isNull1,
+									  datum2,
+									  isNull2,
+									  sortKey);
 
 		if (ret != 0)
 			return ret;
