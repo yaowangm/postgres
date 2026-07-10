@@ -2665,7 +2665,8 @@ normalize_datum(Datum orig, SortSupport ssup)
  * DEALINGS IN THE SOFTWARE.
  */
 static void
-radix_sort_recursive(SortTuple *begin, size_t n_elems, int level, Tuplesortstate *state)
+radix_sort_recursive(SortTuple *begin, size_t n_elems, int level,
+					 Tuplesortstate *state)
 {
 	RadixSortInfo partitions[256] = {0};
 	uint8		remaining_partitions[256];
@@ -3035,19 +3036,20 @@ tuplesort_sort_memtuples(Tuplesortstate *state)
 		 *  IndexTuple(gist): not supported yet
 		 *  IndexTuple(brin): not supported yet
 		 */
-		if (enable_mk_sort &&
+		if (state->mkqsApplicable &&
 			state->base.nKeys > 1 &&
-			state->base.mkqsGetDatumFunc != NULL &&
-			state->mkqsApplicable)
+			state->base.mkqsGetDatumFunc != NULL)
 		{
+			state->mkqsUsed = true;
+
 			/*
 			 * Set relevant Datum Sort Comparator according to concrete data type
 			 * of the first sort key
 			 */
 			if (state->base.haveDatum1)
 			{
-				if (state->base.sortKeys[0].comparator == ssup_datum_unsigned_cmp)
-					state->base.mkqsCompFuncType = MKQS_COMP_FUNC_UNSIGNED;
+				if (state->base.sortKeys[0].abbrev_converter != NULL)
+					state->base.mkqsCompFuncType = MKQS_COMP_FUNC_GENERIC;
 #if SIZEOF_DATUM >= 8
 				else if (state->base.sortKeys[0].comparator == ssup_datum_signed_cmp)
 					state->base.mkqsCompFuncType = MKQS_COMP_FUNC_SIGNED;
@@ -3057,8 +3059,6 @@ tuplesort_sort_memtuples(Tuplesortstate *state)
 				else
 					state->base.mkqsCompFuncType = MKQS_COMP_FUNC_GENERIC;
 			}
-
-			state->mkqsUsed = true;
 
 			mk_qsort_tuple(state->memtuples,
 						   state->memtupcount,
@@ -3559,5 +3559,5 @@ void
 tuplesort_set_mkqsApplicable(Tuplesortstate *state,
 							 bool mkqsApplicable)
 {
-	state->mkqsApplicable = mkqsApplicable;
+	state->mkqsApplicable = mkqsApplicable && enable_mk_sort;
 }

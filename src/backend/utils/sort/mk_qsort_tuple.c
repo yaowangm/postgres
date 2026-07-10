@@ -157,13 +157,56 @@ mkqs_compare_datum_by_shortcut(SortTuple      *tuple1,
 							   SortTuple      *tuple2,
 							   Tuplesortstate *state)
 {
+	int			ret;
+	MkqsCompFuncType compFuncType = state->base.mkqsCompFuncType;
 	SortSupport sortKey = &state->base.sortKeys[0];
 
-	return ApplySortComparator(tuple1->datum1,
-							   tuple1->isnull1,
-							   tuple2->datum1,
-							   tuple2->isnull1,
-							   sortKey);
+	if (tuple1->isnull1)
+	{
+		if (tuple2->isnull1)
+			return 0;
+		else if (sortKey->ssup_nulls_first)
+			return -1;
+		else
+			return 1;
+	}
+	else if (tuple2->isnull1)
+	{
+		if (sortKey->ssup_nulls_first)
+			return 1;
+		else
+			return -1;
+	}
+#if SIZEOF_DATUM >= 8
+	else if (compFuncType == MKQS_COMP_FUNC_SIGNED)
+	{
+		int64		datum1 = DatumGetInt64(tuple1->datum1);
+		int64		datum2 = DatumGetInt64(tuple2->datum1);
+
+		ret = (datum1 > datum2) - (datum1 < datum2);
+	}
+#endif
+	else if (compFuncType == MKQS_COMP_FUNC_INT32)
+	{
+		int32		datum1 = DatumGetInt32(tuple1->datum1);
+		int32		datum2 = DatumGetInt32(tuple2->datum1);
+
+		ret = (datum1 > datum2) - (datum1 < datum2);
+	}
+	else
+	{
+		Assert(compFuncType == MKQS_COMP_FUNC_GENERIC);
+		return ApplySortComparator(tuple1->datum1,
+								   tuple1->isnull1,
+								   tuple2->datum1,
+								   tuple2->isnull1,
+								   sortKey);
+	}
+
+	if (sortKey->ssup_reverse)
+		INVERT_COMPARE_RESULT(ret);
+
+	return ret;
 }
 
 /*
@@ -356,6 +399,71 @@ mkqs_verify(SortTuple *x,
 }
 #endif
 
+static void mk_qsort_tuple(SortTuple *x,
+						   size_t n,
+						   int depth,
+						   Tuplesortstate *state,
+						   bool seenNull);
+
+/*
+ * If the leading key is already nondecreasing, avoid re-partitioning it.
+ * The caller can keep the existing first-key order and recurse only within
+ * each equal-key group.
+ */
+static bool
+mkqs_try_presorted_leading_key(SortTuple *x,
+							   size_t n,
+							   Tuplesortstate *state)
+{
+	size_t		group_start = 0;
+
+	Assert(state->base.nKeys > 1);
+
+	for (size_t i = 1; i < n; i++)
+	{
+		int			ret;
+
+		CHECK_FOR_INTERRUPTS();
+		ret = mkqs_compare_datum(x + i - 1, x + i, 0, state);
+
+		if (ret > 0)
+			return false;
+
+		if (ret < 0)
+		{
+			size_t		group_size = i - group_start;
+
+			if (group_size > 1)
+			{
+				bool		isDatumNull;
+
+				isDatumNull = check_datum_null(x + group_start, 0, state);
+				mk_qsort_tuple(x + group_start,
+							   group_size,
+							   1,
+							   state,
+							   isDatumNull);
+			}
+
+			group_start = i;
+		}
+	}
+
+	if (n - group_start > 1)
+	{
+		bool		isDatumNull;
+
+		isDatumNull = check_datum_null(x + group_start, 0, state);
+		mk_qsort_tuple(x + group_start,
+					   n - group_start,
+					   1,
+					   state,
+					   isDatumNull);
+	}
+
+	return true;
+}
+
 /*
  * Major of multi-key quick sort
  *
@@ -387,7 +495,6 @@ mk_qsort_tuple(SortTuple *x,
 	int32		dist;
 	SortTuple  *pivot;
 	bool		isDatumNull;
-	bool        strictOrdered = true;
 
 
 	Assert(depth <= state->base.nKeys);
@@ -401,32 +508,72 @@ mk_qsort_tuple(SortTuple *x,
 	if (depth == state->base.nKeys)
 		return;
 
+	state->mkqsUsed = true;
+
 	CHECK_FOR_INTERRUPTS();
 
-	/*
-	 * Check if the array is ordered already. If yes, return immediately.
-	 *
-	 * Different from qsort_tuple(), the array must be strict ordered (no
-	 * equal datums). If there are equal datums, we must continue the mk qsort
-	 * process to check datums on lower depth.
-	 */
-	for (int i = 0; i < n - 1; i++)
+	if (depth == 0 && state->base.mkqsCompFuncType != MKQS_COMP_FUNC_GENERIC)
 	{
-		int ret;
+		/*
+		 * Fast path for fully sorted input.  Use the full comparator so this
+		 * behaves like qsort_tuple().  Avoid this for generic comparators:
+		 * late inversions can make the full comparison scan too expensive.
+		 */
+		bool		preOrdered = true;
 
-		CHECK_FOR_INTERRUPTS();
-		ret = mkqs_compare_datum(x + i,
-								 x + i + 1,
-								 depth,
-								 state);
-		if (ret >= 0)
+		for (int i = 0; i < n - 1; i++)
 		{
-			strictOrdered = false;
-			break;
+			CHECK_FOR_INTERRUPTS();
+			if (COMPARETUP(state, x + i, x + i + 1) > 0)
+			{
+				preOrdered = false;
+				break;
+			}
 		}
+
+		if (preOrdered)
+			return;
+	}
+	else
+	{
+		bool		strictOrdered = true;
+
+		/*
+		 * Check if the array is ordered already. If yes, return immediately.
+		 *
+		 * Different from qsort_tuple(), the array must be strict ordered (no
+		 * equal datums). If there are equal datums, we must continue the mk qsort
+		 * process to check datums on lower depth.
+		 */
+		for (int i = 0; i < n - 1; i++)
+		{
+			int ret;
+
+			CHECK_FOR_INTERRUPTS();
+			ret = mkqs_compare_datum(x + i,
+									 x + i + 1,
+									 depth,
+									 state);
+			if (ret >= 0)
+			{
+				strictOrdered = false;
+				break;
+			}
+		}
+
+		if (strictOrdered)
+			return;
 	}
 
-	if (strictOrdered)
+	/*
+	 * For radix-capable datums, preserve the existing first-key order and
+	 * sort only ties by the remaining keys.
+	 */
+	if (depth == 0 &&
+		state->base.nKeys > 1 &&
+		state->base.mkqsCompFuncType != MKQS_COMP_FUNC_GENERIC &&
+		!state->base.mkqsHandleDupFunc &&
+		mkqs_try_presorted_leading_key(x, n, state))
 		return;
 
 	/*

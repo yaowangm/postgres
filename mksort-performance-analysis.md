@@ -10,12 +10,90 @@ comparisons until they are needed.
 The current concern is that benchmark reports show regressions up to about 5%.
 More concerning, similar regressions have reportedly appeared even when the
 classic sort path is used. John Naylor's latest email in
-`/home/wy/download/mksort.html` challenges both the interpretation of those
+`/home/wy/mksort/mksort.html` challenges both the interpretation of those
 numbers and the current implementation structure.
 
 This document summarizes the problem, John Naylor's feedback, likely causes,
 and a concrete plan for producing credible performance evidence and improving
 the patch.
+
+## Local Evidence Inventory
+
+The local mksort reference material is in `/home/wy/mksort`:
+
+- `mksort.html`: archived pgsql-hackers discussion.
+- `mksort-test-v2.sh`: shell script used to generate the local reports.
+- `new_report.txt`: report with mksort allowed whenever the executor path
+  selected it.
+- `new_report_opti.txt`: report with the optimizer/statistics selection logic
+  active.
+- `v6-1-add-Sort-ndistInFirstRow.patch` and
+  `v6-Implement-multi-key-quick-sort.patch`: patch inputs for the reported
+  results.
+
+The two report files only cover 100,000 rows, three column counts (`2`, `5`,
+`8`), four data types (`int`, `bigint`, `timestamptz`, `text`), three layouts
+(`random`, `correlated`, `sequential`), and three repetitions per case. They do
+not cover the larger `1k` to `10M` row matrix discussed in the mailing-list
+thread.
+
+The report's last column is computed as:
+
+```text
+qsort_time / mksort_time - 1
+```
+
+Therefore positive values mean mksort was faster, and negative values mean
+mksort was slower. This is not the same as the more common
+`mksort_time / qsort_time - 1` regression notation, so future reports should
+state the formula explicitly.
+
+Observed local report summary:
+
+- `new_report.txt`: 972 `enable_mk_sort=on` runs, all 972 actually used
+  multi-key quicksort. Worst observed value was `-0.06`; best observed value
+  was `+1.63`. Average value across `on` runs was about `+0.150`.
+- `new_report_opti.txt`: 972 `enable_mk_sort=on` runs, but only 675 actually
+  used multi-key quicksort. 297 `on` runs stayed on qsort. Worst observed value
+  was `-0.06`; best observed value was `+1.60`. Average value across all `on`
+  runs was about `+0.139`.
+- In `new_report_opti.txt`, actual mksort runs averaged about `+0.198`, with
+  observed range `-0.05` to `+1.60`.
+- In `new_report_opti.txt`, `enable_mk_sort=on` runs that did not actually use
+  mksort averaged about `+0.005`, with observed range `-0.06` to `+0.20`.
+
+The optimizer selection logic clearly reduces exposure to low-benefit cases,
+but the local reports still do not prove a worst-case bound. They also show
+that the reported `enable_mk_sort=on` population mixes actual mksort cases with
+qsort cases, so future summaries must separate those groups.
+
+## Current Benchmark Script Limitations
+
+`/home/wy/mksort/mksort-test-v2.sh` is useful as a historical reproduction
+script, but it should not be the next performance harness without changes:
+
+- It runs only three repetitions per case.
+- It compares `off` and `on` inside one generated table, but does not
+  interleave separate binaries or patch variants.
+- It recreates and analyzes the table for every case, which makes data
+  generation part of the overall test process and makes A/A stability harder
+  to see.
+- It records individual runtimes but does not calculate median, MAD, standard
+  deviation, min, or max per case.
+- It has no A/A mode for measuring natural noise of the same binary.
+- It has no `perf stat` mode for hardware counters.
+- It has no explicit variant label, build hash, configure flags, CPU affinity,
+  governor, or machine metadata in the output.
+- The header does not exactly match the emitted columns: output includes both
+  expected and actual distinct counts before column count.
+- The script writes `mk_enabled` by grepping `multi-key` from the plan, which is
+  good, but the later analysis must keep `enable_mk_sort=on` and actual
+  `mk_enabled=yes` separate.
+
+The next benchmarking step should either replace this script or split it into
+two phases: deterministic data generation first, then a measurement harness
+that repeatedly runs fixed queries against fixed data and emits machine-readable
+CSV.
 
 ## Key Points From John Naylor's Feedback
 
@@ -352,6 +430,26 @@ to isolated physical cores.
 ### Build discipline
 
 Use identical build options across all variants.
+
+For this local workspace, use the configured PostgreSQL environment before
+building or running tests:
+
+```bash
+source ~/tool/pg_env.sh
+```
+
+The local workflow aliases are:
+
+- `fullbld`: full rebuild.
+- `bld`: incremental `make -j16` plus install.
+- `pginit`: initialize the test database.
+- `pgstart`: start the PostgreSQL server from `$PGDATA`.
+- `pgstop`: stop the PostgreSQL server.
+
+If one of these scripts fails, treat that as an environment/script issue to
+fix before collecting benchmark numbers. Do not silently switch to a different
+build or server workflow, because that would make future performance results
+harder to compare.
 
 Recommended variants:
 

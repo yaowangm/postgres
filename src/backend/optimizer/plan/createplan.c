@@ -16,6 +16,7 @@
  */
 #include "postgres.h"
 
+#include "access/nbtree.h"
 #include "access/sysattr.h"
 #include "access/htup_details.h"
 #include "access/transam.h"
@@ -6206,6 +6207,9 @@ prepare_sort_from_pathkeys(PlannerInfo *root,
 
 	/* Set mkqsBene to -0.02 to indicate the fixed cost */
 	double		mkqsBene = -0.02;
+	bool		firstKeyRadixComparable = false;
+	bool		firstKeyDominantMcv = false;
+	double		firstKeyNdist = -1;
 
 	/*
 	 * Duplicated value ratio of previous sort key, init to 1.0 for first sort
@@ -6239,6 +6243,7 @@ prepare_sort_from_pathkeys(PlannerInfo *root,
 
 		/* Init value of ndist to -1 to indicate "unknown" */
 		double ndist = -1;
+		double maxMcvFreq = -1;
 
 		if (ec->ec_has_volatile)
 		{
@@ -6378,10 +6383,26 @@ prepare_sort_from_pathkeys(PlannerInfo *root,
 						 */
 						if (stats->stadistinct < 0)
 							ndist = -stats->stadistinct;
-						else
+						else if (stats->stadistinct > 0)
 						{
 							RelOptInfo *rel = root->simple_rel_array[var->varno];
 							ndist = stats->stadistinct / rel->tuples;
+						}
+
+						{
+							AttStatsSlot mcvslot;
+
+							if (get_attstatsslot(&mcvslot, tuple,
+												 STATISTIC_KIND_MCV,
+												 InvalidOid,
+												 ATTSTATSSLOT_NUMBERS))
+							{
+								for (int m = 0; m < mcvslot.nnumbers; m++)
+									maxMcvFreq = Max(maxMcvFreq,
+													 (double) mcvslot.numbers[m]);
+
+								free_attstatsslot(&mcvslot);
+							}
 						}
 					}
 
@@ -6410,51 +6431,84 @@ prepare_sort_from_pathkeys(PlannerInfo *root,
 		collations[numsortkeys] = ec->ec_collation;
 		nullsFirst[numsortkeys] = pathkey->pk_nulls_first;
 
-		/*
-		 * If ndist is valid, calculate benefit for mk qsort
-		 */
-		if (ndist != -1)
 		{
-			double bene = 0;
 			SortSupportData sortKey;
+			Oid			opfamily;
+			Oid			opcintype;
+			CompareType cmptype;
+			Oid			sortSupportFunction = InvalidOid;
+			bool		sortKeyRadixComparable;
 
 			sortKey.comparator = NULL;
 			sortKey.ssup_cxt = CurrentMemoryContext;
 			sortKey.ssup_collation = collations[numsortkeys];
 			sortKey.ssup_nulls_first = nullsFirst[numsortkeys];
 			sortKey.ssup_attno = sortColIdx[numsortkeys];
-			PrepareSortSupportFromOrderingOp(sortop, &sortKey);
 
-			/*
-			 * For data type with/without specialized comparator, use different
-			 * weights. The weights are determined by some experiments and may
-			 * be not accurate for all possible cases.
-			 */
-			if (sortKey.comparator == ssup_datum_unsigned_cmp ||
+			if (get_ordering_op_properties(sortop, &opfamily, &opcintype,
+										   &cmptype))
+			{
+				sortKey.ssup_reverse = (cmptype == COMPARE_GT);
+				sortSupportFunction = get_opfamily_proc(opfamily,
+														opcintype,
+														opcintype,
+														BTSORTSUPPORT_PROC);
+			}
+
+			if (OidIsValid(sortSupportFunction))
+				OidFunctionCall1(sortSupportFunction, PointerGetDatum(&sortKey));
+
+			sortKeyRadixComparable =
+				sortKey.comparator == ssup_datum_unsigned_cmp ||
 #if SIZEOF_DATUM >= 8
 				sortKey.comparator == ssup_datum_signed_cmp ||
 #endif
-				sortKey.comparator == ssup_datum_int32_cmp)
+				sortKey.comparator == ssup_datum_int32_cmp;
+
+			if (numsortkeys == 0 && sortKeyRadixComparable)
 			{
-				/*
-				 * For data type with specialized comparator, ignore the first
-				 * sort key because there is no benefit from duplciated values
-				 * for first sort key.
-				 */
-				if (numsortkeys > 0)
-					bene += dupRio * 0.05;
+				firstKeyRadixComparable = true;
+				firstKeyNdist = ndist;
 			}
-			else
+			else if (numsortkeys == 0 &&
+					 !sortKeyRadixComparable &&
+					 maxMcvFreq >= 0.75)
+				firstKeyDominantMcv = true;
+
+			/*
+			 * If ndist is valid, calculate benefit for mk qsort
+			 */
+			if (ndist != -1)
 			{
+				double bene = 0;
+
 				/*
-				 * For data type without specialized comparator, mksort is
-				 * faster than classical qsort even there is no duplicate. So
-				 * add 1 to dupRio for the extra benefit from no-duplicate
-				 * values.
+				 * For data type with/without specialized comparator, use different
+				 * weights. The weights are determined by some experiments and may
+				 * be not accurate for all possible cases.
 				 */
-				bene += (dupRio + 1) * 0.05;
+				if (sortKeyRadixComparable)
+				{
+					/*
+					 * For data type with specialized comparator, ignore the first
+					 * sort key because there is no benefit from duplciated values
+					 * for first sort key.
+					 */
+					if (numsortkeys > 0)
+						bene += dupRio * 0.05;
+				}
+				else
+				{
+					/*
+					 * For data type without specialized comparator, mksort is
+					 * faster than classical qsort even there is no duplicate. So
+					 * add 1 to dupRio for the extra benefit from no-duplicate
+					 * values.
+					 */
+					bene += (dupRio + 1) * 0.05;
+				}
+				mkqsBene += bene;
 			}
-			mkqsBene += bene;
 		}
 
 		/*
@@ -6474,8 +6528,18 @@ prepare_sort_from_pathkeys(PlannerInfo *root,
 	*p_collations = collations;
 	*p_nullsFirst = nullsFirst;
 
-	/* Enable mk qsort only when estimated benefit >= 0.05 */
-	if (mkqsBene >= 0.05)
+	/*
+	 * Enable mk qsort only when estimated benefit >= 0.05.  For types that
+	 * can use radix sort on the first key, be much more conservative because
+	 * mksort has to beat the radix path, not only qsort.  For generic
+	 * comparators, avoid cases where the first key has one dominant value:
+	 * the executor would scan the leading-key groups and then fall back to
+	 * ordinary qsort, so enable_mk_sort=on would be slower than off.
+	 */
+	if (mkqsBene >= 0.05 &&
+		!firstKeyDominantMcv &&
+		(!firstKeyRadixComparable ||
+		 (firstKeyNdist >= 0 && firstKeyNdist <= 0.001)))
 	{
 		Assert(mkqsApplicable);
 		*mkqsApplicable = true;

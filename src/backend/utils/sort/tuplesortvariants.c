@@ -453,6 +453,13 @@ tuplesort_begin_index_btree(Relation heapRel,
 	base->haveDatum1 = true;
 	base->arg = arg;
 
+	/*
+	 * Unique btree builds must remain on the ordinary path so duplicate
+	 * handling stays unchanged.
+	 */
+	if (base->nKeys > 1 && !enforceUnique)
+		tuplesort_set_mkqsApplicable(state, true);
+
 	arg->index.heapRel = heapRel;
 	arg->index.indexRel = indexRel;
 	arg->enforceUnique = enforceUnique;
