@@ -601,17 +601,6 @@ mk_qsort_tuple(SortTuple *x,
 
 	CHECK_FOR_INTERRUPTS();
 
-	/*
-	 * With two keys, radix sort has already separated the first key.
-	 * Use the standard tiebreak implementation for the remaining key.
-	 */
-	if (state->base.nKeys == 2 &&
-		depth == 1 &&
-		!state->base.mkqsHandleDupFunc)
-	{
-		qsort_tuple(x, n, state->base.comparetup_tiebreak, state);
-		return;
-	}
 
 	if (depth == 0 && state->base.mkqsCompFuncType != MKQS_COMP_FUNC_GENERIC)
 	{
