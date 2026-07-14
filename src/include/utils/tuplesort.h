@@ -71,6 +71,13 @@ typedef enum
 	MKQS_COMP_FUNC_INT32
 } MkqsCompFuncType;
 
+typedef enum
+{
+	MKQS_TUPLE_TYPE_NONE,
+	MKQS_TUPLE_TYPE_HEAP,
+	MKQS_TUPLE_TYPE_INDEX_BTREE
+} MkqsTupleType;
+
 /* Bitwise option flags for tuple sorts */
 #define TUPLESORT_NONE					0
 
@@ -245,8 +252,13 @@ typedef struct
 	void	   *arg;			/* Specific information for the sort variant */
 
 	/*
-	 * Function pointer, referencing a function to get specified datums from
-	 * SortTuple list with multi-key. Used by mk_qsort_tuple().
+	 * Tuple representation supported by mk_qsort_tuple().
+	 */
+	MkqsTupleType mkqsTupleType;
+
+	/*
+	 * Function pointer for representations that cannot use the heap tuple
+	 * inline accessor. Used by mk_qsort_tuple().
 	 */
 	MkqsGetDatumFunc mkqsGetDatumFunc;
 

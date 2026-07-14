@@ -50,6 +50,50 @@ mkqs_vec_swap(int a,
 	}
 }
 
+static pg_attribute_always_inline void
+mkqs_get_datum(const SortTuple *x1,
+				   const SortTuple *x2,
+				   int depth,
+				   Tuplesortstate *state,
+				   Datum *datum1,
+				   bool *isNull1,
+				   Datum *datum2,
+				   bool *isNull2)
+{
+	TuplesortPublic *base = &state->base;
+
+	if (base->mkqsTupleType == MKQS_TUPLE_TYPE_HEAP)
+	{
+		HeapTupleData heapTuple1;
+		AttrNumber	attno = base->sortKeys[depth].ssup_attno;
+		TupleDesc	tupDesc = (TupleDesc) base->arg;
+
+		heapTuple1.t_len = ((MinimalTuple) x1->tuple)->t_len +
+			MINIMAL_TUPLE_OFFSET;
+		heapTuple1.t_data = (HeapTupleHeader) ((char *) x1->tuple -
+			MINIMAL_TUPLE_OFFSET);
+		*datum1 = heap_getattr(&heapTuple1, attno, tupDesc, isNull1);
+
+		if (x2 != NULL)
+		{
+			HeapTupleData heapTuple2;
+
+			heapTuple2.t_len = ((MinimalTuple) x2->tuple)->t_len +
+				MINIMAL_TUPLE_OFFSET;
+			heapTuple2.t_data = (HeapTupleHeader) ((char *) x2->tuple -
+				MINIMAL_TUPLE_OFFSET);
+			*datum2 = heap_getattr(&heapTuple2, attno, tupDesc, isNull2);
+		}
+	}
+	else
+	{
+		Assert(base->mkqsTupleType == MKQS_TUPLE_TYPE_INDEX_BTREE);
+		Assert(base->mkqsGetDatumFunc != NULL);
+		base->mkqsGetDatumFunc(x1, x2, depth, state,
+							 datum1, isNull1, datum2, isNull2);
+	}
+}
+
 /*
  * Check whether current datum (at specified tuple and depth) is null
  * Note that the input x means a specified tuple provided by caller but not
@@ -68,8 +112,8 @@ check_datum_null(SortTuple *x,
 	if (depth == 0)
 		return x->isnull1;
 
-	state->base.mkqsGetDatumFunc(x, NULL, depth, state,
-								 &datum, &isNull, NULL, NULL);
+	mkqs_get_datum(x, NULL, depth, state,
+					&datum, &isNull, NULL, NULL);
 
 	return isNull;
 }
@@ -167,18 +211,12 @@ mkqs_compare_datum_tiebreak(SortTuple *tuple1,
 	SortSupport sortKey;
 	int			ret = 0;
 
-	Assert(state->base.mkqsGetDatumFunc);
+	Assert(state->base.mkqsTupleType != MKQS_TUPLE_TYPE_NONE);
 	Assert(depth < state->base.nKeys);
 
 	sortKey = state->base.sortKeys + depth;
-	state->base.mkqsGetDatumFunc(tuple1,
-								 tuple2,
-								 depth,
-								 state,
-								 &datum1,
-								 &isNull1,
-								 &datum2,
-								 &isNull2);
+	mkqs_get_datum(tuple1, tuple2, depth, state,
+					&datum1, &isNull1, &datum2, &isNull2);
 
 	/*
 	 * If "abbreviated key" is enabled, and we are in the first depth, it
@@ -362,7 +400,7 @@ mkqs_compare_tuple_by_range(SortTuple *tuple1,
 		base = TuplesortstateGetPublic(state);
 		sortKey = base->sortKeys + depth;
 
-		Assert(base->mkqsGetDatumFunc);
+		Assert(base->mkqsTupleType != MKQS_TUPLE_TYPE_NONE);
 		Assert(depth < base->nKeys);
 
 		/*
@@ -374,14 +412,8 @@ mkqs_compare_tuple_by_range(SortTuple *tuple1,
 		 */
 		if (sortKey->abbrev_converter)
 		{
-			base->mkqsGetDatumFunc(tuple1,
-								   tuple2,
-								   depth,
-								   state,
-								   &datum1,
-								   &isNull1,
-								   &datum2,
-								   &isNull2);
+			mkqs_get_datum(tuple1, tuple2, depth, state,
+							&datum1, &isNull1, &datum2, &isNull2);
 			ret = ApplySortAbbrevFullComparator(datum1,
 												isNull1,
 												datum2,
@@ -407,20 +439,14 @@ mkqs_compare_tuple_by_range(SortTuple *tuple1,
 		base = TuplesortstateGetPublic(state);
 		sortKey = base->sortKeys + depth;
 
-		Assert(base->mkqsGetDatumFunc);
+		Assert(base->mkqsTupleType != MKQS_TUPLE_TYPE_NONE);
 		Assert(depth < base->nKeys);
 	}
 
 	while (depth < base->nKeys)
 	{
-		base->mkqsGetDatumFunc(tuple1,
-							   tuple2,
-							   depth,
-							   state,
-							   &datum1,
-							   &isNull1,
-							   &datum2,
-							   &isNull2);
+		mkqs_get_datum(tuple1, tuple2, depth, state,
+						&datum1, &isNull1, &datum2, &isNull2);
 
 		ret = mkqs_apply_sort_comparator(datum1,
 									  isNull1,
@@ -562,7 +588,7 @@ mk_qsort_tuple(SortTuple *x,
 
 	Assert(depth <= state->base.nKeys);
 	Assert(state->base.sortKeys);
-	Assert(state->base.mkqsGetDatumFunc);
+	Assert(state->base.mkqsTupleType != MKQS_TUPLE_TYPE_NONE);
 
 	if (n <= 1)
 		return;
@@ -575,12 +601,24 @@ mk_qsort_tuple(SortTuple *x,
 
 	CHECK_FOR_INTERRUPTS();
 
+	/*
+	 * With two keys, radix sort has already separated the first key.
+	 * Use the standard tiebreak implementation for the remaining key.
+	 */
+	if (state->base.nKeys == 2 &&
+		depth == 1 &&
+		!state->base.mkqsHandleDupFunc)
+	{
+		qsort_tuple(x, n, state->base.comparetup_tiebreak, state);
+		return;
+	}
+
 	if (depth == 0 && state->base.mkqsCompFuncType != MKQS_COMP_FUNC_GENERIC)
 	{
 		/*
-		 * Fast path for fully sorted input.  Use the full comparator so this
-		 * behaves like qsort_tuple().  Avoid this for generic comparators:
-		 * late inversions can make the full comparison scan too expensive.
+		 * Fast path for fully sorted input.  Use the full comparator so that
+		 * equal leading keys are checked at later keys, just as qsort_tuple()
+		 * does in its presorted-input check.
 		 */
 		bool		preOrdered = true;
 
@@ -597,7 +635,7 @@ mk_qsort_tuple(SortTuple *x,
 		if (preOrdered)
 			return;
 	}
-	else
+	else if (depth > 0 || !state->mkqsTopPresortChecked)
 	{
 		bool		strictOrdered = true;
 

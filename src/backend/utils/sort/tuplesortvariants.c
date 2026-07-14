@@ -106,14 +106,6 @@ static void readtup_datum(Tuplesortstate *state, SortTuple *stup,
 						  LogicalTape *tape, unsigned int len);
 static void freestate_cluster(Tuplesortstate *state);
 
-static void mkqs_get_datum_heap(const SortTuple *x1,
-								const SortTuple *x2,
-								const int depth,
-								Tuplesortstate *state,
-								Datum *datum1,
-								bool *isNull1,
-								Datum *datum2,
-								bool *isNull2);
 
 static void
 mkqs_get_datum_index_btree(const SortTuple *x1,
@@ -136,9 +128,6 @@ static int
 										   const SortTuple *b,
 										   Tuplesortstate *state);
 
-static pg_attribute_always_inline void
-extract_heaptuple_from_sorttuple(const SortTuple *sortTuple,
-								 HeapTupleData *heapTuple);
 
 static inline int
 			tuplesort_compare_by_item_pointer(const IndexTuple tuple1,
@@ -262,7 +251,8 @@ tuplesort_begin_heap(TupleDesc tupDesc,
 	base->removeabbrev = removeabbrev_heap;
 	base->comparetup = comparetup_heap;
 	base->comparetup_tiebreak = comparetup_heap_tiebreak;
-	base->mkqsGetDatumFunc = mkqs_get_datum_heap;
+	base->mkqsTupleType = MKQS_TUPLE_TYPE_HEAP;
+	tuplesort_set_mkqsApplicable(state, true);
 	base->writetup = writetup_heap;
 	base->readtup = readtup_heap;
 	base->haveDatum1 = true;
@@ -446,6 +436,7 @@ tuplesort_begin_index_btree(Relation heapRel,
 	base->removeabbrev = removeabbrev_index;
 	base->comparetup = comparetup_index_btree;
 	base->comparetup_tiebreak = comparetup_index_btree_tiebreak;
+	base->mkqsTupleType = MKQS_TUPLE_TYPE_INDEX_BTREE;
 	base->mkqsGetDatumFunc = mkqs_get_datum_index_btree;
 	base->mkqsHandleDupFunc = mkqs_handle_dup_index_btree;
 	base->writetup = writetup_index;
@@ -2128,47 +2119,7 @@ readtup_datum(Tuplesortstate *state, SortTuple *stup,
  *
  * See comparetup_heap() for details.
  */
-static void mkqs_get_datum_heap(const SortTuple *x1,
-								const SortTuple *x2,
-								const int depth,
-								Tuplesortstate *state,
-								Datum *datum1,
-								bool *isNull1,
-								Datum *datum2,
-								bool *isNull2)
-{
-	TupleDesc	tupDesc = NULL;
-	HeapTupleData heapTuple1, heapTuple2;
-	AttrNumber	attno;
-	TuplesortPublic *base = TuplesortstateGetPublic(state);
-	SortSupport sortKey = base->sortKeys + depth;;
 
-	Assert(state);
-	Assert(x1 != NULL);
-
-	tupDesc = (TupleDesc) base->arg;
-	attno = sortKey->ssup_attno;
-
-	/* Extract datum from sortTuple->tuple */
-	extract_heaptuple_from_sorttuple(x1, &heapTuple1);
-	*datum1 = heap_getattr(&heapTuple1, attno, tupDesc, isNull1);
-
-	if (x2 != NULL)
-	{
-		extract_heaptuple_from_sorttuple(x2, &heapTuple2);
-		*datum2 = heap_getattr(&heapTuple2, attno, tupDesc, isNull2);
-	}
-}
-
-static pg_attribute_always_inline void
-extract_heaptuple_from_sorttuple(const SortTuple *sortTuple,
-								 HeapTupleData *heapTuple)
-{
-	heapTuple->t_len = ((MinimalTuple) sortTuple->tuple)->t_len
-						+ MINIMAL_TUPLE_OFFSET;
-	heapTuple->t_data = (HeapTupleHeader) ((char *) sortTuple->tuple
-						- MINIMAL_TUPLE_OFFSET);
-}
 
 /*
  * Get specified datums from SortTuple (IndexTuple for btree index) list

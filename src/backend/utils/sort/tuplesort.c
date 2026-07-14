@@ -101,8 +101,10 @@
 
 #include <limits.h>
 
+#include "access/htup_details.h"
 #include "commands/tablespace.h"
 #include "miscadmin.h"
+#include "optimizer/cost.h"
 #include "pg_trace.h"
 #include "port/pg_bitutils.h"
 #include "storage/shmem.h"
@@ -339,6 +341,9 @@ struct Tuplesortstate
 
 	/* Should multi-key quick sort be used? Determined by optimizer. */
 	bool		mkqsApplicable;
+
+	/* The generic top-level presorted check proved strict order cannot hold. */
+	bool		mkqsTopPresortChecked;
 };
 
 /*
@@ -530,6 +535,12 @@ typedef struct RadixSortInfo
  */
 #define QSORT_THRESHOLD 40
 
+/*
+ * After radix sorting the first key for mksort, small tie groups are cheaper
+ * to finish with the standard tiebreak comparator than with mk_qsort_tuple().
+ */
+#define MKQS_RADIX_TIEBREAK_THRESHOLD 1024
+
 #include "mk_qsort_tuple.c"
 
 /*
@@ -599,6 +610,7 @@ tuplesort_begin_common(int workMem, SortCoordinate coordinate, int sortopt)
 	state->base.tuples = true;
 	state->abbrevNext = 10;
 	state->mkqsUsed = false;
+	state->mkqsTopPresortChecked = false;
 
 	/*
 	 * workMem is forced to be at least 64KB, the current minimum valid value
@@ -2834,12 +2846,15 @@ radix_sort_recursive(SortTuple *begin, size_t n_elems, int level,
 				 * datum (possibly abbreviated), now sort using the tiebreak
 				 * comparator.
 				 */
-				if (use_mksort_tiebreak)
+				if (use_mksort_tiebreak &&
+					num_elements >= MKQS_RADIX_TIEBREAK_THRESHOLD)
+				{
 					mk_qsort_tuple(partition_begin,
-							   num_elements,
-							   1,
-							   state,
-							   false);
+								num_elements,
+								1,
+								state,
+								false);
+				}
 				else
 					qsort_tuple(partition_begin,
 								num_elements,
@@ -2953,11 +2968,13 @@ radix_sort_tuple(SortTuple *data, size_t n, Tuplesortstate *state,
 	if (state->base.onlyKey == NULL && null_count > 1)
 	{
 		if (use_mksort_tiebreak)
+		{
 			mk_qsort_tuple(null_start,
 					   null_count,
 					   1,
 					   state,
 					   true);
+		}
 		else
 			qsort_tuple(null_start,
 						null_count,
@@ -3018,6 +3035,33 @@ verify_memtuples_sorted(Tuplesortstate *state)
 #endif
 }
 
+/* Check whether all in-memory tuples are already in sort order. */
+static bool
+tuplesort_memtuples_presorted(Tuplesortstate *state,
+							  bool *mkqsTopPresortChecked)
+{
+	int			(*comparetup) (const SortTuple *, const SortTuple *,
+								Tuplesortstate *) = state->base.comparetup;
+
+	*mkqsTopPresortChecked = false;
+	for (SortTuple *st = state->memtuples + 1;
+		 st < state->memtuples + state->memtupcount;
+		 st++)
+	{
+		if (comparetup(st - 1, st, state) > 0)
+		{
+			*mkqsTopPresortChecked =
+				mkqs_compare_datum(st - 1, st, 0, state) >= 0;
+			return false;
+		}
+
+		CHECK_FOR_INTERRUPTS();
+	}
+
+	return true;
+}
+
+
 /*
  * Sort all memtuples using specialized routines.
  *
@@ -3035,7 +3079,7 @@ tuplesort_sort_memtuples(Tuplesortstate *state)
 		 * Apply multi-key quick sort when:
 		 *  1. enable_mk_sort is set
 		 *  2. There are multiple keys available
-		 *  3. mkqsGetDatumFunc is filled, which implies that current tuple
+		 *  3. mkqsTupleType is set, which implies that current tuple
 		 *     type is supported by mk qsort. (By now only Heap tuple and Btree
 		 *     Index tuple are supported, and more types may be supported in
 		 *     future.)
@@ -3055,10 +3099,8 @@ tuplesort_sort_memtuples(Tuplesortstate *state)
 		 */
 		if (state->mkqsApplicable &&
 			state->base.nKeys > 1 &&
-			state->base.mkqsGetDatumFunc != NULL)
+			state->base.mkqsTupleType != MKQS_TUPLE_TYPE_NONE)
 		{
-			state->mkqsUsed = true;
-
 			/*
 			 * Set relevant Datum Sort Comparator according to concrete data type
 			 * of the first sort key
@@ -3077,6 +3119,14 @@ tuplesort_sort_memtuples(Tuplesortstate *state)
 					state->base.mkqsCompFuncType = MKQS_COMP_FUNC_GENERIC;
 			}
 
+			/*
+			 * Match qsort_tuple()'s full-key presorted check before entering
+			 * the generic mksort path.
+			 */
+			if (state->base.mkqsCompFuncType == MKQS_COMP_FUNC_GENERIC &&
+				tuplesort_memtuples_presorted(state,
+									 &state->mkqsTopPresortChecked))
+				return;
 			if (state->memtupcount >= QSORT_THRESHOLD &&
 				state->base.mkqsCompFuncType != MKQS_COMP_FUNC_GENERIC &&
 				state->base.sortKeys[0].abbrev_converter == NULL)
@@ -3085,14 +3135,16 @@ tuplesort_sort_memtuples(Tuplesortstate *state)
 							 state->memtupcount,
 							 state,
 							 true);
-				verify_memtuples_sorted(state);
 			}
 			else
+			{
 				mk_qsort_tuple(state->memtuples,
 							   state->memtupcount,
 							   0,
 							   state,
 							   false);
+			}
+			verify_memtuples_sorted(state);
 
 			return;
 		}
