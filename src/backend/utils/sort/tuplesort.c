@@ -536,10 +536,10 @@ typedef struct RadixSortInfo
 #define QSORT_THRESHOLD 40
 
 /*
- * After radix sorting the first key for mksort, small tie groups are cheaper
- * to finish with the standard tiebreak comparator than with mk_qsort_tuple().
+ * Below this size mk_qsort_tuple() uses insertion sort.  After radix sorting
+ * the first key, finish smaller tie groups with the standard comparator.
  */
-#define MKQS_RADIX_TIEBREAK_THRESHOLD 1024
+#define MKQS_INSERTION_SORT_THRESHOLD 16
 
 #include "mk_qsort_tuple.c"
 
@@ -2847,7 +2847,7 @@ radix_sort_recursive(SortTuple *begin, size_t n_elems, int level,
 				 * comparator.
 				 */
 				if (use_mksort_tiebreak &&
-					num_elements >= MKQS_RADIX_TIEBREAK_THRESHOLD)
+					num_elements >= MKQS_INSERTION_SORT_THRESHOLD)
 				{
 					mk_qsort_tuple(partition_begin,
 								num_elements,

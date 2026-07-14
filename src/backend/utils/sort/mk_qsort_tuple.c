@@ -691,7 +691,8 @@ mk_qsort_tuple(SortTuple *x,
 	 *
 	 * TODO: Can we check NULL for bubble sort with minimal cost?
 	 */
-	if (n < 16 && !state->base.mkqsHandleDupFunc)
+	if (n < MKQS_INSERTION_SORT_THRESHOLD &&
+		!state->base.mkqsHandleDupFunc)
 	{
 		for (m = 0;m < n;m++)
 			for (l = m; l > 0; l--)
