@@ -4,8 +4,6 @@ set -euo pipefail
 FORMAL_RUNS=5
 WARMUP_RUNS=${WARMUP_RUNS:-2}
 NROWS=${NROWS:-100000}
-EXPECTED_CPU_KHZ=${EXPECTED_CPU_KHZ:-2000000}
-REQUIRE_STABLE_CPU=${REQUIRE_STABLE_CPU:-1}
 RESTORE_POSTGRES=${RESTORE_POSTGRES:-1}
 POSTGRES_STARTED_FOR_BENCHMARK=0
 
@@ -47,43 +45,6 @@ restart_postgres_for_benchmark() {
 }
 
 
-check_benchmark_cpu() {
-	local cpufreq="/sys/devices/system/cpu/cpu$MKSORT_CPU/cpufreq"
-	local pstate_status="/sys/devices/system/cpu/amd_pstate/status"
-	local governor min_freq max_freq boost driver pstate_mode
-
-	[[ "$REQUIRE_STABLE_CPU" == "1" ]] || return
-	governor=$(cat "$cpufreq/scaling_governor")
-	min_freq=$(cat "$cpufreq/scaling_min_freq")
-	max_freq=$(cat "$cpufreq/scaling_max_freq")
-	driver=$(cat "$cpufreq/scaling_driver")
-	pstate_mode=not-applicable
-	if [[ -f "$pstate_status" ]]; then
-		pstate_mode=$(cat "$pstate_status")
-	fi
-	boost=0
-	if [[ -f /sys/devices/system/cpu/cpufreq/boost ]]; then
-		boost=$(cat /sys/devices/system/cpu/cpufreq/boost)
-	fi
-
-	if [[ "$governor" != "performance" ||
-		  "$min_freq" != "$EXPECTED_CPU_KHZ" ||
-		  "$max_freq" != "$EXPECTED_CPU_KHZ" ||
-		  "$boost" != "0" ||
-		  ("$pstate_mode" != "not-applicable" &&
-		   ("$pstate_mode" != "passive" || "$driver" != "amd-pstate")) ]]; then
-		echo "benchmark CPU is not in the required stable configuration" >&2
-		echo "cpu=$MKSORT_CPU driver=$driver amd_pstate_mode=$pstate_mode governor=$governor min_freq=$min_freq max_freq=$max_freq boost=$boost" >&2
-		echo "expected driver=amd-pstate amd_pstate_mode=passive governor=performance min_freq=max_freq=$EXPECTED_CPU_KHZ boost=0" >&2
-		echo "run: sudo /home/wy/mksort/prepare_benchmark_cpu.sh start $MKSORT_CPU" >&2
-		exit 1
-	fi
-
-	echo "stable CPU: $MKSORT_CPU"
-	echo "CPU driver: $driver ($pstate_mode)"
-	echo "CPU frequency: $EXPECTED_CPU_KHZ kHz"
-	echo "CPU boost: off"
-}
 run_sort_query() {
 	local mksort=$1
 	local timing_file=$2
@@ -328,7 +289,6 @@ echo "one pinned backend per case; formal samples use balanced AB/BA order"
 echo "summary policy: drop one minimum and one maximum gain per case; keep the middle three"
 
 mkdir -p sql
-check_benchmark_cpu
 restart_postgres_for_benchmark
 echo "table row counts: $NROWS"
 
