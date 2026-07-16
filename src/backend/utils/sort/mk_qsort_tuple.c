@@ -310,6 +310,116 @@ mkqs_compare_datum_by_shortcut(SortTuple      *tuple1,
 	return ret;
 }
 
+static int
+comparetup_mk_heap_range(SortTuple *a, SortTuple *b,
+						int start_depth, int max_depth,
+						Tuplesortstate *state)
+{
+	TuplesortPublic *base = &state->base;
+	HeapTupleData ltup;
+	HeapTupleData rtup;
+	TupleDesc	tupDesc = (TupleDesc) base->arg;
+	int			depth = start_depth;
+	int32		compare;
+
+	Assert(start_depth >= 0);
+	Assert(start_depth <= max_depth);
+	Assert(max_depth < base->nKeys);
+
+	if (depth == 0)
+	{
+		SortSupport sortKey = &base->sortKeys[0];
+
+		compare = mkqs_compare_datum_by_shortcut(a, b, state);
+		if (compare != 0)
+			return compare;
+
+		if (!sortKey->abbrev_converter)
+		{
+			if (max_depth == 0)
+				return 0;
+			depth = 1;
+		}
+	}
+
+	ltup.t_len = ((MinimalTuple) a->tuple)->t_len + MINIMAL_TUPLE_OFFSET;
+	ltup.t_data = (HeapTupleHeader) ((char *) a->tuple - MINIMAL_TUPLE_OFFSET);
+	rtup.t_len = ((MinimalTuple) b->tuple)->t_len + MINIMAL_TUPLE_OFFSET;
+	rtup.t_data = (HeapTupleHeader) ((char *) b->tuple - MINIMAL_TUPLE_OFFSET);
+
+	if (depth == 0)
+	{
+		SortSupport sortKey = &base->sortKeys[0];
+		Datum		datum1;
+		Datum		datum2;
+		bool		isnull1;
+		bool		isnull2;
+
+		datum1 = heap_getattr(&ltup, sortKey->ssup_attno, tupDesc, &isnull1);
+		datum2 = heap_getattr(&rtup, sortKey->ssup_attno, tupDesc, &isnull2);
+		compare = ApplySortAbbrevFullComparator(datum1, isnull1,
+										 datum2, isnull2, sortKey);
+		if (compare != 0 || max_depth == 0)
+			return compare;
+		depth = 1;
+	}
+
+	if (depth == max_depth)
+	{
+		SortSupport sortKey = &base->sortKeys[depth];
+		Datum		datum1;
+		Datum		datum2;
+		bool		isnull1;
+		bool		isnull2;
+
+		datum1 = heap_getattr(&ltup, sortKey->ssup_attno, tupDesc, &isnull1);
+		datum2 = heap_getattr(&rtup, sortKey->ssup_attno, tupDesc, &isnull2);
+		return mkqs_apply_sort_comparator(datum1, isnull1,
+										  datum2, isnull2, sortKey);
+	}
+
+	for (; depth <= max_depth; depth++)
+	{
+		SortSupport sortKey = &base->sortKeys[depth];
+		Datum		datum1;
+		Datum		datum2;
+		bool		isnull1;
+		bool		isnull2;
+
+		datum1 = heap_getattr(&ltup, sortKey->ssup_attno, tupDesc, &isnull1);
+		datum2 = heap_getattr(&rtup, sortKey->ssup_attno, tupDesc, &isnull2);
+		compare = mkqs_apply_sort_comparator(datum1, isnull1,
+										 datum2, isnull2, sortKey);
+		if (compare != 0)
+			return compare;
+	}
+
+	return 0;
+}
+
+/* Compare an inclusive range of heap tuple sort-key depths. */
+static pg_attribute_always_inline int
+comparetup_mk_heap(SortTuple *a, SortTuple *b,
+				   int start_depth, int max_depth,
+				   Tuplesortstate *state)
+{
+	if (start_depth == max_depth)
+	{
+		int			compare;
+
+		if (start_depth == 0)
+		{
+			compare = mkqs_compare_datum_by_shortcut(a, b, state);
+			if (compare != 0 || !state->base.sortKeys->abbrev_converter)
+				return compare;
+		}
+
+		return mkqs_compare_datum_tiebreak(a, b, start_depth, state);
+	}
+
+	return comparetup_mk_heap_range(a, b, start_depth, max_depth, state);
+}
+
 /*
  * Compare two tuples at specified depth
  *
@@ -329,6 +439,9 @@ mkqs_compare_datum(SortTuple *tuple1,
 				   Tuplesortstate *state)
 {
 	int			ret = 0;
+
+	if (state->base.mkqsTupleType == MKQS_TUPLE_TYPE_HEAP)
+		return comparetup_mk_heap(tuple1, tuple2, depth, depth, state);
 
 	if (depth == 0)
 	{
@@ -389,6 +502,10 @@ mkqs_compare_tuple_by_range(SortTuple *tuple1,
 				isNull2;
 	SortSupport sortKey;
 	TuplesortPublic *base = NULL;
+
+	if (state->base.mkqsTupleType == MKQS_TUPLE_TYPE_HEAP)
+		return comparetup_mk_heap(tuple1, tuple2, depth,
+									 state->base.nKeys - 1, state);
 
 	if (depth == 0)
 	{
