@@ -1,9 +1,11 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-FORMAL_RUNS=${FORMAL_RUNS:-5}
+FORMAL_RUNS=5
 WARMUP_RUNS=${WARMUP_RUNS:-2}
-MEASURE_REPEATS=${MEASURE_REPEATS:-3}
+NROWS=${NROWS:-100000}
+EXPECTED_CPU_KHZ=${EXPECTED_CPU_KHZ:-2000000}
+REQUIRE_STABLE_CPU=${REQUIRE_STABLE_CPU:-1}
 RESTORE_POSTGRES=${RESTORE_POSTGRES:-1}
 POSTGRES_STARTED_FOR_BENCHMARK=0
 
@@ -44,6 +46,44 @@ restart_postgres_for_benchmark() {
 	fi
 }
 
+
+check_benchmark_cpu() {
+	local cpufreq="/sys/devices/system/cpu/cpu$MKSORT_CPU/cpufreq"
+	local pstate_status="/sys/devices/system/cpu/amd_pstate/status"
+	local governor min_freq max_freq boost driver pstate_mode
+
+	[[ "$REQUIRE_STABLE_CPU" == "1" ]] || return
+	governor=$(cat "$cpufreq/scaling_governor")
+	min_freq=$(cat "$cpufreq/scaling_min_freq")
+	max_freq=$(cat "$cpufreq/scaling_max_freq")
+	driver=$(cat "$cpufreq/scaling_driver")
+	pstate_mode=not-applicable
+	if [[ -f "$pstate_status" ]]; then
+		pstate_mode=$(cat "$pstate_status")
+	fi
+	boost=0
+	if [[ -f /sys/devices/system/cpu/cpufreq/boost ]]; then
+		boost=$(cat /sys/devices/system/cpu/cpufreq/boost)
+	fi
+
+	if [[ "$governor" != "performance" ||
+		  "$min_freq" != "$EXPECTED_CPU_KHZ" ||
+		  "$max_freq" != "$EXPECTED_CPU_KHZ" ||
+		  "$boost" != "0" ||
+		  ("$pstate_mode" != "not-applicable" &&
+		   ("$pstate_mode" != "passive" || "$driver" != "amd-pstate")) ]]; then
+		echo "benchmark CPU is not in the required stable configuration" >&2
+		echo "cpu=$MKSORT_CPU driver=$driver amd_pstate_mode=$pstate_mode governor=$governor min_freq=$min_freq max_freq=$max_freq boost=$boost" >&2
+		echo "expected driver=amd-pstate amd_pstate_mode=passive governor=performance min_freq=max_freq=$EXPECTED_CPU_KHZ boost=0" >&2
+		echo "run: sudo /home/wy/mksort/prepare_benchmark_cpu.sh start $MKSORT_CPU" >&2
+		exit 1
+	fi
+
+	echo "stable CPU: $MKSORT_CPU"
+	echo "CPU driver: $driver ($pstate_mode)"
+	echo "CPU frequency: $EXPECTED_CPU_KHZ kHz"
+	echo "CPU boost: off"
+}
 run_sort_query() {
 	local mksort=$1
 	local timing_file=$2
@@ -56,6 +96,9 @@ SELECT pg_backend_pid() AS backend_pid \gset
 SET max_parallel_workers_per_gather = 0 ;
 SET work_mem = '1GB';
 SET enable_mk_sort = '$mksort';
+\o /dev/null
+EXPLAIN (ANALYZE, TIMING OFF) $query;
+\o
 EXPLAIN (ANALYZE, TIMING OFF) $query;
 SQL
 }
@@ -73,11 +116,18 @@ run_case_queries() {
 		echo 'SELECT pg_backend_pid() AS backend_pid \gset'
 		echo '\setenv BACKEND_PID :backend_pid'
 		printf '\\! taskset -pc %s $BACKEND_PID >/dev/null\n' "$MKSORT_CPU"
-		echo "SET max_parallel_workers_per_gather = 0;"
+		echo 'SET max_parallel_workers_per_gather = 0;'
 		echo "SET work_mem = '1GB';"
 
 		for r in $(seq 1 "$WARMUP_RUNS"); do
-			for mksort in off on; do
+			if ((r % 2)); then
+				first=off
+				second=on
+			else
+				first=on
+				second=off
+			fi
+			for mksort in "$first" "$second"; do
 				echo "\\o $outdir/warmup-$r-$mksort.log"
 				echo "SET enable_mk_sort = '$mksort';"
 				echo "EXPLAIN (ANALYZE, TIMING OFF) $query;"
@@ -86,18 +136,23 @@ run_case_queries() {
 		done
 
 		for r in $(seq 1 "$FORMAL_RUNS"); do
-			for mksort in off on; do
-				for rep in $(seq 1 "$MEASURE_REPEATS"); do
-					echo "\\o $outdir/run-$r-$mksort-$rep.log"
-					echo "SET enable_mk_sort = '$mksort';"
-					echo "EXPLAIN (ANALYZE, TIMING OFF) $query;"
-					echo '\o'
-				done
+			if ((r % 2)); then
+				first=off
+				second=on
+			else
+				first=on
+				second=off
+			fi
+			for mksort in "$first" "$second"; do
+				echo "\\o $outdir/run-$r-$mksort.log"
+				echo "SET enable_mk_sort = '$mksort';"
+				echo "EXPLAIN (ANALYZE, TIMING OFF) $query;"
+				echo '\o'
 			done
 		done
-	} > "$sql_file"
+	} >"$sql_file"
 
-	"${PSQL[@]}" test -f "$sql_file" >> debug.log 2>&1
+	"${PSQL[@]}" test -f "$sql_file" >>debug.log 2>&1
 }
 
 print_summary() {
@@ -108,7 +163,6 @@ print_summary() {
 	echo "$title"
 	python3 - "$input" <<'PY'
 from collections import defaultdict
-import statistics
 import sys
 
 path = sys.argv[1]
@@ -131,23 +185,16 @@ try:
 except FileNotFoundError:
     pass
 
-print(f"{'type':<12s} {'min':>10s} {'max':>10s} {'avg':>10s} {'median':>10s} {'trim_avg':>10s} {'n':>6s}")
+print(f"{'type':<12s} {'min':>10s} {'max':>10s} {'avg':>10s} {'n':>6s}")
 
 for typ in order:
     data = sorted(vals.get(typ, []))
     if not data:
-        print(f"{typ:<12s} {'n/a':>10s} {'n/a':>10s} {'n/a':>10s} {'n/a':>10s} {'n/a':>10s} {0:>6d}")
+        print(f"{typ:<12s} {'n/a':>10s} {'n/a':>10s} {'n/a':>10s} {0:>6d}")
         continue
 
     avg = sum(data) / len(data)
-    median = statistics.median(data)
-    if len(data) >= 5:
-        trimmed = data[1:-1]
-    else:
-        trimmed = data
-    trim_avg = sum(trimmed) / len(trimmed)
-
-    print(f"{typ:<12s} {data[0]:+10.2f} {data[-1]:+10.2f} {avg:+10.2f} {median:+10.2f} {trim_avg:+10.2f} {len(data):>6d}")
+    print(f"{typ:<12s} {data[0]:+10.2f} {data[-1]:+10.2f} {avg:+10.2f} {len(data):>6d}")
 PY
 }
 
@@ -277,10 +324,13 @@ PY
 echo "===== nrows type dist reps target_ndistinct actual_ndistinct cols run enable_mk_sort mk_enabled time gain =====";
 echo "formal runs per case: $FORMAL_RUNS"
 echo "warmup runs per case: $WARMUP_RUNS"
-echo "measure repeats per flag: $MEASURE_REPEATS"
+echo "one pinned backend per case; formal samples use balanced AB/BA order"
+echo "summary policy: drop one minimum and one maximum gain per case; keep the middle three"
 
 mkdir -p sql
+check_benchmark_cpu
 restart_postgres_for_benchmark
+echo "table row counts: $NROWS"
 
 : > summary.log
 : > summary_mk_enabled_yes.log
@@ -292,16 +342,22 @@ restart_postgres_for_benchmark
 : > explain-off.log
 
 # number of rows in the table
-#for nrows in 1000 10000 100000; do
-for nrows in 100000; do
+for nrows in $NROWS; do
 
 	# data type for the columns
 	for dtype in int bigint timestamptz text; do
 
 		# number of repetitions for each value (ndistinct = nrows/count)
+		unset seen_counts
+		declare -A seen_counts=()
 		for count in 1 5 10 25 50 100 10000 $((nrows/10)) $nrows; do
 
-			if [ "$count" -gt "$nrows" ]; then
+			if [[ -n "${seen_counts[$count]:-}" ]]; then
+				continue
+			fi
+			seen_counts[$count]=1
+
+			if [ "$count" -le 0 ] || [ "$count" -gt "$nrows" ]; then
 				continue
 			fi
 
@@ -419,46 +475,33 @@ for nrows in 100000; do
 						done
 					done
 
-					# Run the query several times for each GUC value.
+					# Keep all five raw runs, then summarize only the middle three.
+					case_gain_file="$case_run_dir/formal-gains.tsv"
+					effective_gain_file="$case_run_dir/effective-gains.tsv"
+					: >"$case_gain_file"
 					for r in $(seq 1 "$FORMAL_RUNS"); do
 
 						dif_t="-";
+						dif_exact="-";
 						for mksort in off on; do
 
-							t=""
-							mk="no"
-							best_timing_file=""
-							for rep in $(seq 1 "$MEASURE_REPEATS"); do
-								timing_file="$case_run_dir/run-$r-$mksort-$rep.log"
-								rep_t=$(grep 'Execution Time' "$timing_file" | awk '{print $3}')
-								rep_mk=$(awk '/multi-key/ { found = 1 } END { if (found) print "yes"; else print "no" }' "$timing_file")
-
-								if [ "$rep_mk" == "yes" ]; then
-									mk="yes"
-								fi
-								if [ -z "$t" ] || awk -v a="$rep_t" -v b="$t" 'BEGIN{exit !(a < b)}'; then
-									t="$rep_t"
-									best_timing_file="$timing_file"
-								fi
-							done
+							timing_file="$case_run_dir/run-$r-$mksort.log"
+							t=$(grep 'Execution Time' "$timing_file" | awk '{print $3}')
+							mk=$(awk '/multi-key/ { found = 1 } END { if (found) print "yes"; else print "no" }' "$timing_file")
 
 							echo "===== rows $nrows type $dtype count $count distribution $distribution cols $ncols run $r =====" >> explain-$mksort.log 2>&1
-							cat "$best_timing_file" >> explain-$mksort.log 2>&1
+							cat "$timing_file" >> explain-$mksort.log 2>&1
 							echo "$dtype $distribution $count $ncols $mksort $mk $t" >> runtime_detail.log
 
 							if [ "$mksort" == "off" ]; then
 								old_t=$t;
 							else
-								dif_t=$(awk -v old_t=$old_t -v t=$t 'BEGIN{printf "%+0.2f", old_t/t - 1}');
+								dif_exact=$(awk -v old_t=$old_t -v t=$t 'BEGIN{printf "%+.8f", old_t/t - 1}');
+								dif_t=$(awk -v gain=$dif_exact 'BEGIN{printf "%+.2f", gain}');
 
 							fi
 							if [ "$mksort" == "on" ]; then
-								echo "$dtype $dif_t" >> summary.log
-								echo "$dtype $distribution $count $ncols $dif_t" >> summary_detail.log
-							fi
-							if [ "$mksort" == "on" ] && [ "$mk" == "yes" ]; then
-								echo "$dtype $dif_t" >> summary_mk_enabled_yes.log
-								echo "$dtype $distribution $count $ncols $dif_t" >> summary_detail_mk_enabled_yes.log
+								printf '%s\t%s\t%s\n' "$r" "$mk" "$dif_exact" >>"$case_gain_file"
 							fi
 							echo $nrows $dtype $distribution $count $ndistinct1 $ndistinct2 $ncols $r $mksort $mk $t $dif_t
 
@@ -466,6 +509,25 @@ for nrows in 100000; do
 
 					done
 
+
+					LC_ALL=C sort -t $'\t' -k3,3g "$case_gain_file" |
+						sed '1d;$d' >"$effective_gain_file"
+
+					if [[ $(wc -l <"$effective_gain_file") -ne 3 ]]; then
+						echo "expected three effective gains for $dtype $distribution count=$count cols=$ncols" >&2
+						exit 1
+					fi
+
+					echo "effective runs after dropping min/max: $(cut -f1 "$effective_gain_file" | paste -sd, -)"
+					while IFS=$'\t' read -r effective_run effective_mk effective_gain; do
+						echo "$dtype $effective_gain" >>summary.log
+						echo "$dtype $distribution $count $ncols $effective_gain" >>summary_detail.log
+
+						if [[ "$effective_mk" == "yes" ]]; then
+							echo "$dtype $effective_gain" >>summary_mk_enabled_yes.log
+							echo "$dtype $distribution $count $ncols $effective_gain" >>summary_detail_mk_enabled_yes.log
+						fi
+					done <"$effective_gain_file"
 					rm -rf "$case_run_dir"
 
 				done
@@ -480,8 +542,6 @@ done
 
 print_summary "Summary of mksort on relative to off" summary.log
 print_summary "Summary of mksort on relative to off (mk_enabled=yes only)" summary_mk_enabled_yes.log
-print_case_median_summary "Summary of per-case median gains" summary_detail.log
-print_case_median_summary "Summary of per-case median gains (mk_enabled=yes only)" summary_detail_mk_enabled_yes.log
 print_runtime_outlier_summary "Summary of per-case runtime slow outliers" runtime_detail.log
 
 # John Naylor's open question: the first key commonly ties, but the second
