@@ -3054,7 +3054,7 @@ tuplesort_memtuples_presorted(Tuplesortstate *state,
 		if (comparetup(st - 1, st, state) > 0)
 		{
 			*mkqsTopPresortChecked =
-				mkqs_compare_datum(st - 1, st, 0, state) >= 0;
+				comparetup_mk(st - 1, st, 0, 0, state) >= 0;
 			return false;
 		}
 

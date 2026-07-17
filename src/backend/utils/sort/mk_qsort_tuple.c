@@ -51,47 +51,21 @@ mkqs_vec_swap(int a,
 }
 
 static pg_attribute_always_inline void
-mkqs_get_datum(const SortTuple *x1,
-				   const SortTuple *x2,
-				   int depth,
-				   Tuplesortstate *state,
-				   Datum *datum1,
-				   bool *isNull1,
-				   Datum *datum2,
-				   bool *isNull2)
+mkqs_get_index_datum(const SortTuple *x1,
+					 const SortTuple *x2,
+					 int depth,
+					 Tuplesortstate *state,
+					 Datum *datum1,
+					 bool *isNull1,
+					 Datum *datum2,
+					 bool *isNull2)
 {
 	TuplesortPublic *base = &state->base;
 
-	if (base->mkqsTupleType == MKQS_TUPLE_TYPE_HEAP)
-	{
-		HeapTupleData heapTuple1;
-		AttrNumber	attno = base->sortKeys[depth].ssup_attno;
-		TupleDesc	tupDesc = (TupleDesc) base->arg;
-
-		heapTuple1.t_len = ((MinimalTuple) x1->tuple)->t_len +
-			MINIMAL_TUPLE_OFFSET;
-		heapTuple1.t_data = (HeapTupleHeader) ((char *) x1->tuple -
-			MINIMAL_TUPLE_OFFSET);
-		*datum1 = heap_getattr(&heapTuple1, attno, tupDesc, isNull1);
-
-		if (x2 != NULL)
-		{
-			HeapTupleData heapTuple2;
-
-			heapTuple2.t_len = ((MinimalTuple) x2->tuple)->t_len +
-				MINIMAL_TUPLE_OFFSET;
-			heapTuple2.t_data = (HeapTupleHeader) ((char *) x2->tuple -
-				MINIMAL_TUPLE_OFFSET);
-			*datum2 = heap_getattr(&heapTuple2, attno, tupDesc, isNull2);
-		}
-	}
-	else
-	{
-		Assert(base->mkqsTupleType == MKQS_TUPLE_TYPE_INDEX_BTREE);
-		Assert(base->mkqsGetDatumFunc != NULL);
-		base->mkqsGetDatumFunc(x1, x2, depth, state,
-							 datum1, isNull1, datum2, isNull2);
-	}
+	Assert(base->mkqsTupleType == MKQS_TUPLE_TYPE_INDEX_BTREE);
+	Assert(base->mkqsGetDatumFunc != NULL);
+	base->mkqsGetDatumFunc(x1, x2, depth, state,
+						 datum1, isNull1, datum2, isNull2);
 }
 
 /*
@@ -112,8 +86,21 @@ check_datum_null(SortTuple *x,
 	if (depth == 0)
 		return x->isnull1;
 
-	mkqs_get_datum(x, NULL, depth, state,
-					&datum, &isNull, NULL, NULL);
+	if (state->base.mkqsTupleType == MKQS_TUPLE_TYPE_HEAP)
+	{
+		HeapTupleData heapTuple;
+		SortSupport sortKey = &state->base.sortKeys[depth];
+
+		heapTuple.t_len = ((MinimalTuple) x->tuple)->t_len +
+			MINIMAL_TUPLE_OFFSET;
+		heapTuple.t_data = (HeapTupleHeader) ((char *) x->tuple -
+			MINIMAL_TUPLE_OFFSET);
+		datum = heap_getattr(&heapTuple, sortKey->ssup_attno,
+							 (TupleDesc) state->base.arg, &isNull);
+	}
+	else
+		mkqs_get_index_datum(x, NULL, depth, state,
+							 &datum, &isNull, NULL, NULL);
 
 	return isNull;
 }
@@ -199,10 +186,10 @@ mkqs_apply_sort_comparator(Datum datum1,
  * See comparetup_heap() for details.
  */
 static inline int
-mkqs_compare_datum_tiebreak(SortTuple *tuple1,
-							SortTuple *tuple2,
-							int depth,
-							Tuplesortstate *state)
+comparetup_mk_index_btree_single(SortTuple *tuple1,
+								 SortTuple *tuple2,
+								 int depth,
+								 Tuplesortstate *state)
 {
 	Datum		datum1,
 				datum2;
@@ -211,18 +198,18 @@ mkqs_compare_datum_tiebreak(SortTuple *tuple1,
 	SortSupport sortKey;
 	int			ret = 0;
 
-	Assert(state->base.mkqsTupleType != MKQS_TUPLE_TYPE_NONE);
+	Assert(state->base.mkqsTupleType == MKQS_TUPLE_TYPE_INDEX_BTREE);
 	Assert(depth < state->base.nKeys);
 
 	sortKey = state->base.sortKeys + depth;
-	mkqs_get_datum(tuple1, tuple2, depth, state,
-					&datum1, &isNull1, &datum2, &isNull2);
+	mkqs_get_index_datum(tuple1, tuple2, depth, state,
+						 &datum1, &isNull1, &datum2, &isNull2);
 
 	/*
 	 * If "abbreviated key" is enabled, and we are in the first depth, it
 	 * means only "abbreviated keys" was compared. If the two datums were
 	 * determined to be equal by ApplySortComparator() in
-	 * mkqs_compare_datum(), we need to perform an extra "full" comparing
+	 * comparetup_mk(), we need to perform an extra "full" comparing
 	 * by ApplySortAbbrevFullComparator().
 	 */
 	if (sortKey->abbrev_converter &&
@@ -397,6 +384,48 @@ comparetup_mk_heap_range(SortTuple *a, SortTuple *b,
 	return 0;
 }
 
+/* Compare heap tuples at exactly one sort-key depth. */
+static pg_attribute_always_inline int
+comparetup_mk_heap_single(SortTuple *a, SortTuple *b,
+						 int depth, Tuplesortstate *state)
+{
+	TuplesortPublic *base = &state->base;
+	SortSupport sortKey = &base->sortKeys[depth];
+	HeapTupleData ltup;
+	HeapTupleData rtup;
+	Datum		datum1;
+	Datum		datum2;
+	bool		isnull1;
+	bool		isnull2;
+	int32		compare;
+
+	Assert(depth >= 0);
+	Assert(depth < base->nKeys);
+
+	if (depth == 0)
+	{
+		compare = mkqs_compare_datum_by_shortcut(a, b, state);
+		if (compare != 0 || !sortKey->abbrev_converter)
+			return compare;
+	}
+
+	ltup.t_len = ((MinimalTuple) a->tuple)->t_len + MINIMAL_TUPLE_OFFSET;
+	ltup.t_data = (HeapTupleHeader) ((char *) a->tuple - MINIMAL_TUPLE_OFFSET);
+	rtup.t_len = ((MinimalTuple) b->tuple)->t_len + MINIMAL_TUPLE_OFFSET;
+	rtup.t_data = (HeapTupleHeader) ((char *) b->tuple - MINIMAL_TUPLE_OFFSET);
+	datum1 = heap_getattr(&ltup, sortKey->ssup_attno,
+						  (TupleDesc) base->arg, &isnull1);
+	datum2 = heap_getattr(&rtup, sortKey->ssup_attno,
+						  (TupleDesc) base->arg, &isnull2);
+
+	if (depth == 0)
+		return ApplySortAbbrevFullComparator(datum1, isnull1,
+										 datum2, isnull2, sortKey);
+
+	return mkqs_apply_sort_comparator(datum1, isnull1,
+								  datum2, isnull2, sortKey);
+}
+
 /* Compare an inclusive range of heap tuple sort-key depths. */
 static pg_attribute_always_inline int
 comparetup_mk_heap(SortTuple *a, SortTuple *b,
@@ -404,66 +433,60 @@ comparetup_mk_heap(SortTuple *a, SortTuple *b,
 				   Tuplesortstate *state)
 {
 	if (start_depth == max_depth)
-	{
-		int			compare;
-
-		if (start_depth == 0)
-		{
-			compare = mkqs_compare_datum_by_shortcut(a, b, state);
-			if (compare != 0 || !state->base.sortKeys->abbrev_converter)
-				return compare;
-		}
-
-		return mkqs_compare_datum_tiebreak(a, b, start_depth, state);
-	}
+		return comparetup_mk_heap_single(a, b, start_depth, state);
 
 	return comparetup_mk_heap_range(a, b, start_depth, max_depth, state);
 }
 
-/*
- * Compare two tuples at specified depth
- *
- * Firstly try to call some shortcuts by mkqs_compare_datum_by_shortcut(),
- * which are much faster because they just compare leading sort keys; if they
- * are equal, call mkqs_compare_datum_tiebreak().
- *
- * The reason to use MkqsCompFuncType but not compare function pointers
- * directly is just for performance.
- *
- * See comparetup_heap() for details.
- */
-static inline int
-mkqs_compare_datum(SortTuple *tuple1,
-				   SortTuple *tuple2,
-				   int depth,
-				   Tuplesortstate *state)
+/* Compare an inclusive range of btree index tuple sort-key depths. */
+static int
+comparetup_mk_index_btree(SortTuple *a, SortTuple *b,
+						 int start_depth, int max_depth,
+						 Tuplesortstate *state)
 {
-	int			ret = 0;
+	int			depth = start_depth;
+	int			compare;
 
-	if (state->base.mkqsTupleType == MKQS_TUPLE_TYPE_HEAP)
-		return comparetup_mk_heap(tuple1, tuple2, depth, depth, state);
+	Assert(state->base.mkqsTupleType == MKQS_TUPLE_TYPE_INDEX_BTREE);
+	Assert(start_depth >= 0);
+	Assert(start_depth <= max_depth);
+	Assert(max_depth < state->base.nKeys);
 
 	if (depth == 0)
 	{
-		ret = mkqs_compare_datum_by_shortcut(tuple1, tuple2, state);
+		compare = mkqs_compare_datum_by_shortcut(a, b, state);
 
-		if (ret != 0)
-			return ret;
+		if (compare != 0)
+			return compare;
 
-		/*
-		 * If they are equal and it is not an abbr key, no need to
-		 * continue.
-		 */
 		if (!state->base.sortKeys->abbrev_converter)
-			return ret;
+		{
+			if (max_depth == 0)
+				return 0;
+			depth = 1;
+		}
 	}
 
-	ret = mkqs_compare_datum_tiebreak(tuple1,
-									  tuple2,
-									  depth,
-									  state);
+	for (; depth <= max_depth; depth++)
+	{
+		compare = comparetup_mk_index_btree_single(a, b, depth, state);
+		if (compare != 0)
+			return compare;
+	}
 
-	return ret;
+	return 0;
+}
+
+/* Compare an inclusive range of sort-key depths. */
+static pg_attribute_always_inline int
+comparetup_mk(SortTuple *a, SortTuple *b,
+			  int start_depth, int max_depth,
+			  Tuplesortstate *state)
+{
+	if (state->base.mkqsTupleType == MKQS_TUPLE_TYPE_HEAP)
+		return comparetup_mk_heap(a, b, start_depth, max_depth, state);
+
+	return comparetup_mk_index_btree(a, b, start_depth, max_depth, state);
 }
 
 /* Find the median of three values */
@@ -475,111 +498,11 @@ get_median_from_three(int a,
 					  int depth,
 					  Tuplesortstate *state)
 {
-	return mkqs_compare_datum(x + a, x + b, depth, state) < 0 ?
-			 (mkqs_compare_datum(x + b, x + c, depth, state) < 0 ?
-				b : (mkqs_compare_datum(x + a, x + c, depth, state) < 0 ? c : a))
-			 : (mkqs_compare_datum(x + b, x + c, depth, state) > 0 ?
-				b : (mkqs_compare_datum(x + a, x + c, depth, state) < 0 ? a : c));
-}
-
-/*
- * Compare two tuples by starting specified depth till latest depth
- *
- * Caller should guarantee that all datums before specified depth
- * are equal. The function is used by bubble sort in the middle of
- * mk qsort.
- */
-static inline int
-mkqs_compare_tuple_by_range(SortTuple *tuple1,
-							SortTuple *tuple2,
-							int depth,
-							Tuplesortstate *state)
-{
-	int			ret = 0;
-	Datum		datum1,
-				datum2;
-	bool		isNull1,
-				isNull2;
-	SortSupport sortKey;
-	TuplesortPublic *base = NULL;
-
-	if (state->base.mkqsTupleType == MKQS_TUPLE_TYPE_HEAP)
-		return comparetup_mk_heap(tuple1, tuple2, depth,
-									 state->base.nKeys - 1, state);
-
-	if (depth == 0)
-	{
-		ret = mkqs_compare_datum_by_shortcut(tuple1, tuple2, state);
-
-		if (ret != 0)
-			return ret;
-
-		base = TuplesortstateGetPublic(state);
-		sortKey = base->sortKeys + depth;
-
-		Assert(base->mkqsTupleType != MKQS_TUPLE_TYPE_NONE);
-		Assert(depth < base->nKeys);
-
-		/*
-		 * If "abbreviated key" is enabled, and we are in the first depth, it
-		 * means only "abbreviated keys" was compared. If the two datums were
-		 * determined to be equal by ApplySortComparator() in
-		 * mkqs_compare_datum(), we need to perform an extra "full" comparing
-		 * by ApplySortAbbrevFullComparator().
-		 */
-		if (sortKey->abbrev_converter)
-		{
-			mkqs_get_datum(tuple1, tuple2, depth, state,
-							&datum1, &isNull1, &datum2, &isNull2);
-			ret = ApplySortAbbrevFullComparator(datum1,
-												isNull1,
-												datum2,
-												isNull2,
-												sortKey);
-			if (ret != 0)
-				return ret;
-		}
-
-		/*
-		 * By now, all works about first depth have been down. Move the
-		 * depth and sortKey to next level.
-		 */
-		depth++;
-		sortKey++;
-	}
-
-	/*
-	 * Init base/sortKey because they may not have been initialized
-	 * if the init depth > 1
-	 */
-	if (base == NULL) {
-		base = TuplesortstateGetPublic(state);
-		sortKey = base->sortKeys + depth;
-
-		Assert(base->mkqsTupleType != MKQS_TUPLE_TYPE_NONE);
-		Assert(depth < base->nKeys);
-	}
-
-	while (depth < base->nKeys)
-	{
-		mkqs_get_datum(tuple1, tuple2, depth, state,
-						&datum1, &isNull1, &datum2, &isNull2);
-
-		ret = mkqs_apply_sort_comparator(datum1,
-									  isNull1,
-									  datum2,
-									  isNull2,
-									  sortKey);
-
-		if (ret != 0)
-			return ret;
-
-		depth++;
-		sortKey++;
-	}
-
-	Assert(ret == 0);
-	return 0;
+	return comparetup_mk(x + a, x + b, depth, depth, state) < 0 ?
+			 (comparetup_mk(x + b, x + c, depth, depth, state) < 0 ?
+				b : (comparetup_mk(x + a, x + c, depth, depth, state) < 0 ? c : a))
+			 : (comparetup_mk(x + b, x + c, depth, depth, state) > 0 ?
+				b : (comparetup_mk(x + a, x + c, depth, depth, state) < 0 ? a : c));
 }
 
 #ifdef USE_ASSERT_CHECKING
@@ -596,10 +519,8 @@ mkqs_verify(SortTuple *x,
 
 	for (int i = 0; i < n - 1; i++)
 	{
-		ret = mkqs_compare_datum(x + i,
-								 x + i + 1,
-								 depth,
-								 state);
+		ret = comparetup_mk(x + i, x + i + 1,
+							depth, depth, state);
 		Assert(ret <= 0);
 	}
 }
@@ -630,7 +551,7 @@ mkqs_try_presorted_leading_key(SortTuple *x,
 		int			ret;
 
 		CHECK_FOR_INTERRUPTS();
-		ret = mkqs_compare_datum(x + i - 1, x + i, 0, state);
+		ret = comparetup_mk(x + i - 1, x + i, 0, 0, state);
 
 		if (ret > 0)
 			return false;
@@ -757,10 +678,8 @@ mk_qsort_tuple(SortTuple *x,
 			int ret;
 
 			CHECK_FOR_INTERRUPTS();
-			ret = mkqs_compare_datum(x + i,
-									 x + i + 1,
-									 depth,
-									 state);
+			ret = comparetup_mk(x + i, x + i + 1,
+								depth, depth, state);
 			if (ret >= 0)
 			{
 				strictOrdered = false;
@@ -803,8 +722,8 @@ mk_qsort_tuple(SortTuple *x,
 		for (m = 0;m < n;m++)
 			for (l = m; l > 0; l--)
 			{
-				if (mkqs_compare_tuple_by_range(x + l - 1, x + l, depth, state)
-					<= 0)
+				if (comparetup_mk(x + l - 1, x + l, depth,
+								 state->base.nKeys - 1, state) <= 0)
 					break;
 				mkqs_swap(l, l - 1, x);
 			}
@@ -840,10 +759,8 @@ mk_qsort_tuple(SortTuple *x,
 		while (lessEnd <= greaterStart)
 		{
 			/* Compare lessEnd and pivot at current depth */
-			dist = mkqs_compare_datum(x + lessEnd,
-									  pivot,
-									  depth,
-									  state);
+			dist = comparetup_mk(x + lessEnd, pivot,
+								 depth, depth, state);
 
 			if (dist > 0)
 				break;
@@ -861,10 +778,8 @@ mk_qsort_tuple(SortTuple *x,
 		while (lessEnd <= greaterStart)
 		{
 			/* Compare greaterStart and pivot at current depth */
-			dist = mkqs_compare_datum(x + greaterStart,
-									  pivot,
-									  depth,
-									  state);
+			dist = comparetup_mk(x + greaterStart, pivot,
+								 depth, depth, state);
 
 			if (dist < 0)
 				break;

@@ -2108,20 +2108,6 @@ readtup_datum(Tuplesortstate *state, SortTuple *stup,
 }
 
 /*
- * Get specified datums from SortTuple (HeapTuple) list
- *
- * When x1 and x2 are provided by caller, two datums will be returned.
- * When x2 is NULL, only one datum will be returned.
- *
- * Note the function does not check leading sort key (tuple->datum1 and
- * tuple->isnull), which should be checked in other functions (e.g.
- * mkqs_compare_datum()).
- *
- * See comparetup_heap() for details.
- */
-
-
-/*
  * Get specified datums from SortTuple (IndexTuple for btree index) list
  *
  * When x1 and x2 are provided by caller, two datums will be returned.
@@ -2129,7 +2115,7 @@ readtup_datum(Tuplesortstate *state, SortTuple *stup,
  *
  * Note the function does not check leading sort key (tuple->datum1 and
  * tuple->isnull), which should be checked in other functions (e.g.
- * mkqs_compare_datum()).
+ * comparetup_mk()).
  *
  * See comparetup_index_btree() for details.
  */
