@@ -342,8 +342,8 @@ struct Tuplesortstate
 	/* Should multi-key quick sort be used? Determined by optimizer. */
 	bool		mkqsApplicable;
 
-	/* The generic top-level presorted check proved strict order cannot hold. */
-	bool		mkqsTopPresortChecked;
+	/* The complete top-level presorted check was performed and failed. */
+	bool		mkqsTopPresortFailed;
 };
 
 /*
@@ -613,7 +613,7 @@ tuplesort_begin_common(int workMem, SortCoordinate coordinate, int sortopt)
 	state->base.tuples = true;
 	state->abbrevNext = 10;
 	state->mkqsUsed = false;
-	state->mkqsTopPresortChecked = false;
+	state->mkqsTopPresortFailed = false;
 
 	/*
 	 * workMem is forced to be at least 64KB, the current minimum valid value
@@ -3038,33 +3038,6 @@ verify_memtuples_sorted(Tuplesortstate *state)
 #endif
 }
 
-/* Check whether all in-memory tuples are already in sort order. */
-static bool
-tuplesort_memtuples_presorted(Tuplesortstate *state,
-							  bool *mkqsTopPresortChecked)
-{
-	int			(*comparetup) (const SortTuple *, const SortTuple *,
-								Tuplesortstate *) = state->base.comparetup;
-
-	*mkqsTopPresortChecked = false;
-	for (SortTuple *st = state->memtuples + 1;
-		 st < state->memtuples + state->memtupcount;
-		 st++)
-	{
-		if (comparetup(st - 1, st, state) > 0)
-		{
-			*mkqsTopPresortChecked =
-				comparetup_mk(st - 1, st, 0, 0, state) >= 0;
-			return false;
-		}
-
-		CHECK_FOR_INTERRUPTS();
-	}
-
-	return true;
-}
-
-
 /*
  * Sort all memtuples using specialized routines.
  *
@@ -3126,10 +3099,13 @@ tuplesort_sort_memtuples(Tuplesortstate *state)
 			 * Match qsort_tuple()'s full-key presorted check before entering
 			 * the generic mksort path.
 			 */
-			if (state->base.mkqsCompFuncType == MKQS_COMP_FUNC_GENERIC &&
-				tuplesort_memtuples_presorted(state,
-									 &state->mkqsTopPresortChecked))
-				return;
+			if (state->base.mkqsCompFuncType == MKQS_COMP_FUNC_GENERIC)
+			{
+				if (mkqs_full_order_presorted(state->memtuples,
+									  state->memtupcount, state))
+					return;
+				state->mkqsTopPresortFailed = true;
+			}
 			if (state->memtupcount >= QSORT_THRESHOLD &&
 				state->base.mkqsCompFuncType != MKQS_COMP_FUNC_GENERIC &&
 				state->base.sortKeys[0].abbrev_converter == NULL)

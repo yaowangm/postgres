@@ -489,6 +489,60 @@ comparetup_mk(SortTuple *a, SortTuple *b,
 	return comparetup_mk_index_btree(a, b, start_depth, max_depth, state);
 }
 
+/*
+ * Check whether the tuples are nondecreasing over the complete ordering.
+ * Equality is safe because every depth that can affect the final order is
+ * included.
+ *
+ * comparetup_mk() does not yet expose btree's implicit heap TID depth, so use
+ * the btree variant's full comparator until that depth is represented here.
+ */
+static bool
+mkqs_full_order_presorted(SortTuple *x, size_t n, Tuplesortstate *state)
+{
+	Assert(state->base.nKeys > 0);
+
+	for (size_t i = 1; i < n; i++)
+	{
+		int			compare;
+
+		CHECK_FOR_INTERRUPTS();
+		if (state->base.mkqsTupleType == MKQS_TUPLE_TYPE_INDEX_BTREE)
+			compare = COMPARETUP(state, x + i - 1, x + i);
+		else
+			compare = comparetup_mk(x + i - 1, x + i, 0,
+									 state->base.nKeys - 1, state);
+
+		if (compare > 0)
+			return false;
+	}
+
+	return true;
+}
+
+/*
+ * Check only the current depth.  Equality is not sufficient to return from
+ * mksort because later depths have not been checked; equal groups still need
+ * to recurse to the next depth.
+ */
+static bool
+mkqs_depth_strictly_increasing(SortTuple *x, size_t n, int depth,
+							   Tuplesortstate *state)
+{
+	Assert(depth >= 0);
+	Assert(depth < state->base.nKeys);
+
+	for (size_t i = 1; i < n; i++)
+	{
+		CHECK_FOR_INTERRUPTS();
+		if (comparetup_mk(x + i - 1, x + i,
+							depth, depth, state) >= 0)
+			return false;
+	}
+
+	return true;
+}
+
 /* Find the median of three values */
 static inline int
 get_median_from_three(int a,
@@ -538,9 +592,9 @@ static void mk_qsort_tuple(SortTuple *x,
  * each equal-key group.
  */
 static bool
-mkqs_try_presorted_leading_key(SortTuple *x,
-							   size_t n,
-							   Tuplesortstate *state)
+mkqs_sort_presorted_leading_groups(SortTuple *x,
+								  size_t n,
+								  Tuplesortstate *state)
 {
 	size_t		group_start = 0;
 
@@ -640,56 +694,15 @@ mk_qsort_tuple(SortTuple *x,
 	CHECK_FOR_INTERRUPTS();
 
 
-	if (depth == 0 && state->base.mkqsCompFuncType != MKQS_COMP_FUNC_GENERIC)
+	if (depth == 0)
 	{
-		/*
-		 * Fast path for fully sorted input.  Use the full comparator so that
-		 * equal leading keys are checked at later keys, just as qsort_tuple()
-		 * does in its presorted-input check.
-		 */
-		bool		preOrdered = true;
-
-		for (int i = 0; i < n - 1; i++)
-		{
-			CHECK_FOR_INTERRUPTS();
-			if (COMPARETUP(state, x + i, x + i + 1) > 0)
-			{
-				preOrdered = false;
-				break;
-			}
-		}
-
-		if (preOrdered)
+		/* The caller may already have performed and failed this exact scan. */
+		if (!state->mkqsTopPresortFailed &&
+			mkqs_full_order_presorted(x, n, state))
 			return;
 	}
-	else if (depth > 0 || !state->mkqsTopPresortChecked)
-	{
-		bool		strictOrdered = true;
-
-		/*
-		 * Check if the array is ordered already. If yes, return immediately.
-		 *
-		 * Different from qsort_tuple(), the array must be strict ordered (no
-		 * equal datums). If there are equal datums, we must continue the mk qsort
-		 * process to check datums on lower depth.
-		 */
-		for (int i = 0; i < n - 1; i++)
-		{
-			int ret;
-
-			CHECK_FOR_INTERRUPTS();
-			ret = comparetup_mk(x + i, x + i + 1,
-								depth, depth, state);
-			if (ret >= 0)
-			{
-				strictOrdered = false;
-				break;
-			}
-		}
-
-		if (strictOrdered)
-			return;
-	}
+	else if (mkqs_depth_strictly_increasing(x, n, depth, state))
+		return;
 
 	/*
 	 * For radix-capable datums, preserve the existing first-key order and
@@ -699,7 +712,7 @@ mk_qsort_tuple(SortTuple *x,
 		state->base.nKeys > 1 &&
 		state->base.mkqsCompFuncType != MKQS_COMP_FUNC_GENERIC &&
 		!state->base.mkqsHandleDupFunc &&
-		mkqs_try_presorted_leading_key(x, n, state))
+		mkqs_sort_presorted_leading_groups(x, n, state))
 		return;
 
 	/*

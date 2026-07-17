@@ -3,8 +3,8 @@
 ## 状态
 
 本文记录 John Naylor 对 mksort compare abstraction、presort semantics 和
-comparator hot path 的意见，以及相应的设计分析。它是设计方案，不代表当前
-代码已经采用这些修改。
+comparator hot path 的意见，以及相应的设计分析。各节保留重构前的问题背景，
+已经采用的修改在对应的“当前实现”小节中说明。
 
 ## 问题背景
 
@@ -251,7 +251,7 @@ John 的第二个问题是：
 > I don't understand why the pre-ordered check sometimes tolerates
 > duplicates and sometimes doesn't.
 
-当前代码中确实存在多种 pre-ordered check。表面上的差异是有时使用
+重构前代码中确实存在多种 pre-ordered check。表面上的差异是有时使用
 **ret > 0** 判定未排序，允许 equality；有时使用 **ret >= 0**，要求严格
 递增。真正决定 equality 是否安全的因素不是 comparator type，而是该检查
 覆盖的 key range，以及发现 equality 后是否继续处理后续 depths。
@@ -269,14 +269,14 @@ COMPARETUP 按完整 ordering semantics 比较所有显式 keys；btree comparat
 还会比较隐式 TID。返回 0 表示两个 tuples 在完整排序语义下相等，它们保持
 当前相对位置仍然是合法排序结果。因此这里可以接受 equality。
 
-generic comparator path 在进入 mk_qsort_tuple() 之前也通过
+重构前的 generic comparator path 在进入 mk_qsort_tuple() 之前也通过
 **tuplesort_memtuples_presorted()** 做同样的 full-key check。standard
 radix/qsort 的 presorted check 也采用 full comparator 和 nondecreasing
 判定。
 
 ### 只比较当前 depth
 
-mk_qsort_tuple() 的另一条路径只调用：
+重构前 mk_qsort_tuple() 的另一条路径只调用：
 
 ~~~c
 mkqs_compare_datum(a, b, depth, state)
@@ -301,7 +301,7 @@ partition，并让 equal group 进入下一 depth。因此 single-depth check �
 
 ### Leading-key optimization
 
-**mkqs_try_presorted_leading_key()** 也允许第一键 equality：
+重构前的 **mkqs_try_presorted_leading_key()** 也允许第一键 equality：
 
 ~~~c
 if (ret > 0)
@@ -316,7 +316,7 @@ mk_qsort_tuple()。因此这里 tolerates leading-key duplicates 的准确含义
 
 这与 full-key check 接受 equality 后直接返回，是两种不同的安全条件。
 
-### mkqsTopPresortChecked
+### 重构前的 mkqsTopPresortChecked
 
 generic top-level full-key check 失败时，会记录：
 
@@ -336,7 +336,7 @@ mk_qsort_tuple() 随后可以跳过一次必然失败的 single-depth strict-ord
 
 ### 为什么 John 的疑问合理
 
-当前行为在算法上可以解释，但 abstraction 和命名不够清楚：
+重构前行为在算法上可以解释，但 abstraction 和命名不够清楚：
 
 - COMPARETUP 隐含 full-key range。
 - mkqs_compare_datum 隐含 single-depth range。
@@ -371,6 +371,31 @@ recursive handling of equal groups”，而不是泛称 presorted check。
 
 这不会自动减少所有 presort scans，但会让每次 scan 的正确性条件可见，也
 能避免 generic/specialized comparator 对“已排序”的定义继续漂移。
+
+### 当前实现
+
+当前代码已经通过命名和 depth-range 调用把三种语义分开：
+
+1. **mkqs_full_order_presorted()** 只用于 top-level complete ordering scan。
+   heap 明确比较 depth 0 到 nKeys - 1；btree 在隐式 TID depth 尚未纳入
+   **comparetup_mk()** 前，继续使用其 standard full comparator。该检查允许
+   full-order equality，并可以直接结束排序。
+2. **mkqs_depth_strictly_increasing()** 只比较当前 depth。它要求严格递增；
+   equality 表示后续 depths 尚未检查，必须继续 partition 和 depth recursion。
+3. **mkqs_sort_presorted_leading_groups()** 检查 leading key nondecreasing，
+   允许 equality，但会显式地对每个 equal group 从下一 depth 继续排序。
+
+原来的 **mkqsTopPresortChecked** 已改为 **mkqsTopPresortFailed**。generic
+top-level full-order scan 失败后直接设置该状态，不再额外执行一次必然得到
+大于或等于零的 single-depth comparison。这样 state 表达的是“相同的完整
+top scan 已执行且失败”，而不是隐含的 strict-order 推论。
+
+曾尝试在每个 mksort recursive depth 都执行完整 remaining-range scan，并允许
+equality。该方案功能正确，但在 3 到 5 键 duplicate-heavy case 中造成约
+3% 到 4% 稳定回退，因为 mksort 的 equal-key depth recursion 会重复扫描后续
+键；standard qsort 没有对应的逐键递归层级。因此最终只在 top level 使用
+full-order scan，递归 depth 保留语义明确且成本较低的 single-depth strict
+scan。
 
 ## 3A：将 shortcut 和 abbreviation 表示为负 depth
 
