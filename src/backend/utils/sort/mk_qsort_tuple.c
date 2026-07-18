@@ -171,6 +171,7 @@ mkqs_apply_sort_comparator(Datum datum1,
 typedef enum MkqsPartitionCompareKind
 {
 	MKQS_PARTITION_COMPARE_GENERIC,
+	MKQS_PARTITION_COMPARE_HEAP_GENERIC,
 	MKQS_PARTITION_COMPARE_HEAP_SIGNED,
 	MKQS_PARTITION_COMPARE_HEAP_UNSIGNED,
 	MKQS_PARTITION_COMPARE_HEAP_INT32,
@@ -257,6 +258,23 @@ MKQS_DEFINE_HEAP_COMPARATOR(mkqs_compare_heap_int32, int32, DatumGetInt32)
 
 #undef MKQS_DEFINE_HEAP_COMPARATOR
 
+static pg_attribute_always_inline int
+mkqs_compare_heap_generic(SortTuple *tuple1, SortTuple *tuple2,
+						  SortSupport sortKey, Tuplesortstate *state)
+{
+	Datum		datum1;
+	Datum		datum2;
+	bool		isNull1;
+	bool		isNull2;
+
+	mkqs_get_heap_datums(tuple1, tuple2, sortKey, state,
+						 &datum1, &isNull1, &datum2, &isNull2);
+
+	return ApplySortComparator(datum1, isNull1,
+							   datum2, isNull2,
+							   sortKey);
+}
+
 static inline MkqsPartitionCompareKind
 mkqs_select_partition_compare_kind(Tuplesortstate *state, int depth)
 {
@@ -275,7 +293,7 @@ mkqs_select_partition_compare_kind(Tuplesortstate *state, int depth)
 	if (sortKey->comparator == ssup_datum_int32_cmp)
 		return MKQS_PARTITION_COMPARE_HEAP_INT32;
 
-	return MKQS_PARTITION_COMPARE_GENERIC;
+	return MKQS_PARTITION_COMPARE_HEAP_GENERIC;
 }
 
 typedef struct MkqsPartitionBounds
@@ -332,6 +350,56 @@ static pg_attribute_always_inline int comparetup_mk(SortTuple *a,
 	} while (0)
 
 /*
+ * Keep the generic comparator in the caller's code path.  Unlike the typed
+ * cases, it does not benefit from dispatching to a specialized partition.
+ */
+static pg_attribute_always_inline void
+mkqs_partition_generic(SortTuple *x, size_t n, int depth,
+					   Tuplesortstate *state, MkqsPartitionBounds *bounds)
+{
+	SortTuple  *pivot = x;
+	int32		dist;
+
+	bounds->lessStart = 1;
+	bounds->lessEnd = 1;
+	bounds->greaterStart = n - 1;
+	bounds->greaterEnd = n - 1;
+
+	MKQS_PARTITION_LOOP(
+		comparetup_mk(x + bounds->lessEnd, pivot,
+					  depth, depth, state),
+		comparetup_mk(x + bounds->greaterStart, pivot,
+					  depth, depth, state));
+	pg_unreachable();
+}
+
+/*
+ * Heap generic comparators need neither tuple-representation dispatch nor
+ * integer comparator detection once recursion has selected this depth.
+ */
+static pg_attribute_always_inline void
+mkqs_partition_heap_generic(SortTuple *x, size_t n, int depth,
+							Tuplesortstate *state,
+							MkqsPartitionBounds *bounds)
+{
+	SortTuple  *pivot = x;
+	SortSupport sortKey = &state->base.sortKeys[depth];
+	int32		dist;
+
+	bounds->lessStart = 1;
+	bounds->lessEnd = 1;
+	bounds->greaterStart = n - 1;
+	bounds->greaterEnd = n - 1;
+
+	MKQS_PARTITION_LOOP(
+		mkqs_compare_heap_generic(x + bounds->lessEnd,
+								  pivot, sortKey, state),
+		mkqs_compare_heap_generic(x + bounds->greaterStart,
+								  pivot, sortKey, state));
+	pg_unreachable();
+}
+
+/*
  * Split one partition using a comparison path selected by the caller.  The
  * specialized cases keep tuple access and integer comparison decisions out
  * of the inner loops; the generic case retains the complete comparator.
@@ -352,6 +420,12 @@ mkqs_partition(SortTuple *x, size_t n, int depth, Tuplesortstate *state,
 
 	switch (compareKind)
 	{
+		case MKQS_PARTITION_COMPARE_GENERIC:
+			pg_unreachable();
+
+		case MKQS_PARTITION_COMPARE_HEAP_GENERIC:
+			pg_unreachable();
+
 #if SIZEOF_DATUM >= 8
 		case MKQS_PARTITION_COMPARE_HEAP_SIGNED:
 			MKQS_PARTITION_LOOP(
@@ -378,13 +452,6 @@ mkqs_partition(SortTuple *x, size_t n, int depth, Tuplesortstate *state,
 									pivot, sortKey, state));
 			pg_unreachable();
 
-		case MKQS_PARTITION_COMPARE_GENERIC:
-			MKQS_PARTITION_LOOP(
-				comparetup_mk(x + bounds->lessEnd, pivot,
-							  depth, depth, state),
-				comparetup_mk(x + bounds->greaterStart, pivot,
-							  depth, depth, state));
-			pg_unreachable();
 	}
 
 	pg_unreachable();
@@ -983,7 +1050,13 @@ mk_qsort_tuple(SortTuple *x,
 	mkqs_swap(0, lessStart, x);
 
 	compareKind = mkqs_select_partition_compare_kind(state, depth);
-	mkqs_partition(x, n, depth, state, compareKind, &bounds);
+	if (compareKind == MKQS_PARTITION_COMPARE_GENERIC)
+		mkqs_partition_generic(x, n, depth, state, &bounds);
+	else if (compareKind == MKQS_PARTITION_COMPARE_HEAP_GENERIC)
+		mkqs_partition_heap_generic(x, n, depth, state, &bounds);
+	else
+		mkqs_partition(x, n, depth, state, compareKind, &bounds);
+
 	lessStart = bounds.lessStart;
 	lessEnd = bounds.lessEnd;
 	greaterStart = bounds.greaterStart;
