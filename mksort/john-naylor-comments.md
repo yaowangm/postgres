@@ -821,6 +821,51 @@ John 在 comment 4 中指出的问题。
 只有 branch misses 很低并不能否定该问题：一个稳定可预测但每次 comparison
 都执行的 branch，仍然消耗 instructions 和前端带宽。
 
+### 当前实现和验证结果
+
+当前原型只对有 perf 证据的 heap、depth > 0 整数比较做有限 specialization，
+没有展开 abbreviation、NULL、reverse、btree 等条件的组合：
+
+- 递归进入 partition 时，`mkqs_select_partition_compare_kind()` 根据 tuple type、
+  depth 和 SortSupport comparator 选择 generic、signed、unsigned 或 int32。
+- `mkqs_partition()` 每个 partition 只进行一次 switch，之后进入固定的三向
+  partition loop。
+- 三个整数 loop 直接完成 heap datum extraction、NULL ordering 和整数比较，
+  不再在每次比较中经过 `mkqs_apply_sort_comparator()` 的 comparator 类型链。
+- depth 0、text/generic comparator 和 btree 继续使用完整的
+  `comparetup_mk()` 路径；没有在热循环中使用函数指针。
+
+这样做刻意限制了代码变体数量。它实现了 John 所说的 recursion/partition
+boundary dispatch，但没有把所有固定属性都组合成专用函数，避免 specialization
+爆炸反过来扩大 I-cache 工作集。
+
+固定 100k-row、5-key duplicate-heavy heap case 的 8 轮 perf stat 中位数：
+
+| case | metric | before | after | change |
+| --- | ---: | ---: | ---: | ---: |
+| int | execution ms | 37.99 | 36.57 | -3.75% |
+| int | instructions | 268.83M | 254.17M | -5.45% |
+| int | branches | 50.63M | 45.62M | -9.89% |
+| int | cycles | 82.48M | 79.00M | -4.22% |
+| text control | execution ms | 124.34 | 124.66 | +0.26% |
+| text control | cycles | 256.04M | 255.88M | -0.06% |
+
+完整 `mksort_test.sh` 的 `mk_enabled=yes only` 逐 case 中位数结果为：
+
+- 最差 case median：-0.69%，满足 1% regression 限制。
+- 全部 case median 平均收益：从 +22.96% 提升到 +23.81%。
+- 全部 case median 的中位数：从 +16.51% 提升到 +17.31%。
+- John Naylor candidate 的 median gain：+46.00%。
+
+最低收益的 timestamptz/random/50/8 case 另做了三组复跑。原型 9 个有效
+样本的平均 gain 为 +0.54%，基准为 +0.52%；原型有一个 -1.85% 单轮尾值，
+但其余 8 个样本均不低于 -0.51%，没有稳定执行层回退证据。完整结果保存在
+`/home/wy/mksort/new_result_comment4.txt`。第二次完整矩阵保存在
+`new_result_comment4_repeat.txt`，其 423 个 `mk_enabled=yes` 有效样本精确最差
+为 -0.975%，逐 case 最差中位数为 -0.720%，平均收益为 +24.41%；第一份中
+-1.72% 的单样本尾值没有复现。perf 原始结果保存在
+`/home/wy/mksort/comment4-perf-prototype1.csv` 和对应的 `.data` 文件中。
+
 ## 建议实施顺序
 
 1. 为当前 heap 和 non-unique btree 行为增加 focused correctness tests。
@@ -853,7 +898,7 @@ John 在 comment 4 中指出的问题。
 ### Performance
 
 - standard sort 路径不得因新接口产生变化。
-- mksort 最坏情况 regression 仍不得超过 2%。
+- mksort 最坏情况 regression 仍不得超过 1%。
 - 比较现有 accessor-specialized 实现与 depth-range 实现的 instructions、
   cycles、IPC、branch misses 和 cache misses。
 - single-depth hot comparison 不得因 dynamic callback 或 range loop 明显变慢。
