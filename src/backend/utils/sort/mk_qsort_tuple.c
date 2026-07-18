@@ -223,82 +223,39 @@ mkqs_compare_nulls(bool isNull1, bool isNull2, SortSupport sortKey,
 	return false;
 }
 
+#define MKQS_DEFINE_HEAP_COMPARATOR(name, ctype, datum_getter) \
+static pg_attribute_always_inline int \
+name(SortTuple *tuple1, SortTuple *tuple2, \
+	 SortSupport sortKey, Tuplesortstate *state) \
+{ \
+	Datum		datum1; \
+	Datum		datum2; \
+	bool		isNull1; \
+	bool		isNull2; \
+	int			compare; \
+ \
+	mkqs_get_heap_datums(tuple1, tuple2, sortKey, state, \
+						 &datum1, &isNull1, &datum2, &isNull2); \
+	if (!mkqs_compare_nulls(isNull1, isNull2, sortKey, &compare)) \
+	{ \
+		ctype		value1 = datum_getter(datum1); \
+		ctype		value2 = datum_getter(datum2); \
+ \
+		compare = (value1 > value2) - (value1 < value2); \
+		if (sortKey->ssup_reverse) \
+			INVERT_COMPARE_RESULT(compare); \
+	} \
+ \
+	return compare; \
+}
+
 #if SIZEOF_DATUM >= 8
-static pg_attribute_always_inline int
-mkqs_compare_heap_signed(SortTuple *tuple1, SortTuple *tuple2,
-						 SortSupport sortKey, Tuplesortstate *state)
-{
-	Datum		datum1;
-	Datum		datum2;
-	bool		isNull1;
-	bool		isNull2;
-	int			compare;
-
-	mkqs_get_heap_datums(tuple1, tuple2, sortKey, state,
-						 &datum1, &isNull1, &datum2, &isNull2);
-	if (!mkqs_compare_nulls(isNull1, isNull2, sortKey, &compare))
-	{
-		int64		value1 = DatumGetInt64(datum1);
-		int64		value2 = DatumGetInt64(datum2);
-
-		compare = (value1 > value2) - (value1 < value2);
-		if (sortKey->ssup_reverse)
-			INVERT_COMPARE_RESULT(compare);
-	}
-
-	return compare;
-}
-
-static pg_attribute_always_inline int
-mkqs_compare_heap_unsigned(SortTuple *tuple1, SortTuple *tuple2,
-						   SortSupport sortKey, Tuplesortstate *state)
-{
-	Datum		datum1;
-	Datum		datum2;
-	bool		isNull1;
-	bool		isNull2;
-	int			compare;
-
-	mkqs_get_heap_datums(tuple1, tuple2, sortKey, state,
-						 &datum1, &isNull1, &datum2, &isNull2);
-	if (!mkqs_compare_nulls(isNull1, isNull2, sortKey, &compare))
-	{
-		uint64		value1 = DatumGetUInt64(datum1);
-		uint64		value2 = DatumGetUInt64(datum2);
-
-		compare = (value1 > value2) - (value1 < value2);
-		if (sortKey->ssup_reverse)
-			INVERT_COMPARE_RESULT(compare);
-	}
-
-	return compare;
-}
+MKQS_DEFINE_HEAP_COMPARATOR(mkqs_compare_heap_signed, int64, DatumGetInt64)
+MKQS_DEFINE_HEAP_COMPARATOR(mkqs_compare_heap_unsigned, uint64, DatumGetUInt64)
 #endif
+MKQS_DEFINE_HEAP_COMPARATOR(mkqs_compare_heap_int32, int32, DatumGetInt32)
 
-static pg_attribute_always_inline int
-mkqs_compare_heap_int32(SortTuple *tuple1, SortTuple *tuple2,
-						SortSupport sortKey, Tuplesortstate *state)
-{
-	Datum		datum1;
-	Datum		datum2;
-	bool		isNull1;
-	bool		isNull2;
-	int			compare;
-
-	mkqs_get_heap_datums(tuple1, tuple2, sortKey, state,
-						 &datum1, &isNull1, &datum2, &isNull2);
-	if (!mkqs_compare_nulls(isNull1, isNull2, sortKey, &compare))
-	{
-		int32		value1 = DatumGetInt32(datum1);
-		int32		value2 = DatumGetInt32(datum2);
-
-		compare = (value1 > value2) - (value1 < value2);
-		if (sortKey->ssup_reverse)
-			INVERT_COMPARE_RESULT(compare);
-	}
-
-	return compare;
-}
+#undef MKQS_DEFINE_HEAP_COMPARATOR
 
 static inline MkqsPartitionCompareKind
 mkqs_select_partition_compare_kind(Tuplesortstate *state, int depth)
@@ -334,6 +291,46 @@ static pg_attribute_always_inline int comparetup_mk(SortTuple *a,
 												  int start_depth, int max_depth,
 												  Tuplesortstate *state);
 
+#define MKQS_PARTITION_LOOP(compare_left, compare_right) \
+	do { \
+		while (true) \
+		{ \
+			CHECK_FOR_INTERRUPTS(); \
+ \
+			while (bounds->lessEnd <= bounds->greaterStart) \
+			{ \
+				dist = (compare_left); \
+				if (dist > 0) \
+					break; \
+				if (dist == 0) \
+				{ \
+					mkqs_swap(bounds->lessEnd, bounds->lessStart, x); \
+					bounds->lessStart++; \
+				} \
+				bounds->lessEnd++; \
+			} \
+ \
+			while (bounds->lessEnd <= bounds->greaterStart) \
+			{ \
+				dist = (compare_right); \
+				if (dist < 0) \
+					break; \
+				if (dist == 0) \
+				{ \
+					mkqs_swap(bounds->greaterStart, bounds->greaterEnd, x); \
+					bounds->greaterEnd--; \
+				} \
+				bounds->greaterStart--; \
+			} \
+ \
+			if (bounds->lessEnd > bounds->greaterStart) \
+				return; \
+			mkqs_swap(bounds->lessEnd, bounds->greaterStart, x); \
+			bounds->lessEnd++; \
+			bounds->greaterStart--; \
+		} \
+	} while (0)
+
 /*
  * Split one partition using a comparison path selected by the caller.  The
  * specialized cases keep tuple access and integer comparison decisions out
@@ -357,169 +354,43 @@ mkqs_partition(SortTuple *x, size_t n, int depth, Tuplesortstate *state,
 	{
 #if SIZEOF_DATUM >= 8
 		case MKQS_PARTITION_COMPARE_HEAP_SIGNED:
-			while (true)
-			{
-				CHECK_FOR_INTERRUPTS();
-
-				while (bounds->lessEnd <= bounds->greaterStart)
-				{
-					dist = mkqs_compare_heap_signed(x + bounds->lessEnd,
-											 pivot, sortKey, state);
-					if (dist > 0)
-						break;
-					if (dist == 0)
-					{
-						mkqs_swap(bounds->lessEnd, bounds->lessStart, x);
-						bounds->lessStart++;
-					}
-					bounds->lessEnd++;
-				}
-
-				while (bounds->lessEnd <= bounds->greaterStart)
-				{
-					dist = mkqs_compare_heap_signed(x + bounds->greaterStart,
-											 pivot, sortKey, state);
-					if (dist < 0)
-						break;
-					if (dist == 0)
-					{
-						mkqs_swap(bounds->greaterStart, bounds->greaterEnd, x);
-						bounds->greaterEnd--;
-					}
-					bounds->greaterStart--;
-				}
-
-				if (bounds->lessEnd > bounds->greaterStart)
-					return;
-				mkqs_swap(bounds->lessEnd, bounds->greaterStart, x);
-				bounds->lessEnd++;
-				bounds->greaterStart--;
-			}
+			MKQS_PARTITION_LOOP(
+				mkqs_compare_heap_signed(x + bounds->lessEnd,
+									 pivot, sortKey, state),
+				mkqs_compare_heap_signed(x + bounds->greaterStart,
+									 pivot, sortKey, state));
+			pg_unreachable();
 
 		case MKQS_PARTITION_COMPARE_HEAP_UNSIGNED:
-			while (true)
-			{
-				CHECK_FOR_INTERRUPTS();
-
-				while (bounds->lessEnd <= bounds->greaterStart)
-				{
-					dist = mkqs_compare_heap_unsigned(x + bounds->lessEnd,
-											   pivot, sortKey, state);
-					if (dist > 0)
-						break;
-					if (dist == 0)
-					{
-						mkqs_swap(bounds->lessEnd, bounds->lessStart, x);
-						bounds->lessStart++;
-					}
-					bounds->lessEnd++;
-				}
-
-				while (bounds->lessEnd <= bounds->greaterStart)
-				{
-					dist = mkqs_compare_heap_unsigned(x + bounds->greaterStart,
-											   pivot, sortKey, state);
-					if (dist < 0)
-						break;
-					if (dist == 0)
-					{
-						mkqs_swap(bounds->greaterStart, bounds->greaterEnd, x);
-						bounds->greaterEnd--;
-					}
-					bounds->greaterStart--;
-				}
-
-				if (bounds->lessEnd > bounds->greaterStart)
-					return;
-				mkqs_swap(bounds->lessEnd, bounds->greaterStart, x);
-				bounds->lessEnd++;
-				bounds->greaterStart--;
-			}
+			MKQS_PARTITION_LOOP(
+				mkqs_compare_heap_unsigned(x + bounds->lessEnd,
+									   pivot, sortKey, state),
+				mkqs_compare_heap_unsigned(x + bounds->greaterStart,
+									   pivot, sortKey, state));
+			pg_unreachable();
 #endif
 
 		case MKQS_PARTITION_COMPARE_HEAP_INT32:
-			while (true)
-			{
-				CHECK_FOR_INTERRUPTS();
-
-				while (bounds->lessEnd <= bounds->greaterStart)
-				{
-					dist = mkqs_compare_heap_int32(x + bounds->lessEnd,
-											pivot, sortKey, state);
-					if (dist > 0)
-						break;
-					if (dist == 0)
-					{
-						mkqs_swap(bounds->lessEnd, bounds->lessStart, x);
-						bounds->lessStart++;
-					}
-					bounds->lessEnd++;
-				}
-
-				while (bounds->lessEnd <= bounds->greaterStart)
-				{
-					dist = mkqs_compare_heap_int32(x + bounds->greaterStart,
-											pivot, sortKey, state);
-					if (dist < 0)
-						break;
-					if (dist == 0)
-					{
-						mkqs_swap(bounds->greaterStart, bounds->greaterEnd, x);
-						bounds->greaterEnd--;
-					}
-					bounds->greaterStart--;
-				}
-
-				if (bounds->lessEnd > bounds->greaterStart)
-					return;
-				mkqs_swap(bounds->lessEnd, bounds->greaterStart, x);
-				bounds->lessEnd++;
-				bounds->greaterStart--;
-			}
+			MKQS_PARTITION_LOOP(
+				mkqs_compare_heap_int32(x + bounds->lessEnd,
+									pivot, sortKey, state),
+				mkqs_compare_heap_int32(x + bounds->greaterStart,
+									pivot, sortKey, state));
+			pg_unreachable();
 
 		case MKQS_PARTITION_COMPARE_GENERIC:
-			while (true)
-			{
-				CHECK_FOR_INTERRUPTS();
-
-				while (bounds->lessEnd <= bounds->greaterStart)
-				{
-					dist = comparetup_mk(x + bounds->lessEnd, pivot,
-									 depth, depth, state);
-					if (dist > 0)
-						break;
-					if (dist == 0)
-					{
-						mkqs_swap(bounds->lessEnd, bounds->lessStart, x);
-						bounds->lessStart++;
-					}
-					bounds->lessEnd++;
-				}
-
-				while (bounds->lessEnd <= bounds->greaterStart)
-				{
-					dist = comparetup_mk(x + bounds->greaterStart, pivot,
-									 depth, depth, state);
-					if (dist < 0)
-						break;
-					if (dist == 0)
-					{
-						mkqs_swap(bounds->greaterStart, bounds->greaterEnd, x);
-						bounds->greaterEnd--;
-					}
-					bounds->greaterStart--;
-				}
-
-				if (bounds->lessEnd > bounds->greaterStart)
-					return;
-				mkqs_swap(bounds->lessEnd, bounds->greaterStart, x);
-				bounds->lessEnd++;
-				bounds->greaterStart--;
-			}
+			MKQS_PARTITION_LOOP(
+				comparetup_mk(x + bounds->lessEnd, pivot,
+							  depth, depth, state),
+				comparetup_mk(x + bounds->greaterStart, pivot,
+							  depth, depth, state));
+			pg_unreachable();
 	}
 
 	pg_unreachable();
 }
+
+#undef MKQS_PARTITION_LOOP
 
 /*
  * Compare two tuples at specified depth
