@@ -148,8 +148,22 @@ mkqs_apply_sort_comparator(Datum datum1,
 {
 	int			ret;
 
-	if (mkqs_compare_nulls(isNull1, isNull2, sortKey, &ret))
-		return ret;
+	if (isNull1)
+	{
+		if (isNull2)
+			return 0;
+		else if (sortKey->ssup_nulls_first)
+			return -1;
+		else
+			return 1;
+	}
+	else if (isNull2)
+	{
+		if (sortKey->ssup_nulls_first)
+			return 1;
+		else
+			return -1;
+	}
 
 #if SIZEOF_DATUM >= 8
 	if (sortKey->comparator == ssup_datum_signed_cmp)
@@ -220,6 +234,21 @@ mkqs_get_heap_datums(SortTuple *tuple1, SortTuple *tuple2,
 						   (TupleDesc) state->base.arg, isNull2);
 }
 
+/* Extract the current sort-key datum from one heap tuple. */
+static pg_attribute_always_inline Datum
+mkqs_get_heap_datum(SortTuple *tuple, SortSupport sortKey,
+					Tuplesortstate *state, bool *isNull)
+{
+	HeapTupleData heapTuple;
+
+	heapTuple.t_len = ((MinimalTuple) tuple->tuple)->t_len +
+		MINIMAL_TUPLE_OFFSET;
+	heapTuple.t_data = (HeapTupleHeader) ((char *) tuple->tuple -
+		MINIMAL_TUPLE_OFFSET);
+	return heap_getattr(&heapTuple, sortKey->ssup_attno,
+						(TupleDesc) state->base.arg, isNull);
+}
+
 #if SIZEOF_DATUM >= 8
 #define MKQS_COMPARE mkqs_compare_heap_signed
 #define MKQS_COMPARE_TYPE int64
@@ -237,21 +266,20 @@ mkqs_get_heap_datums(SortTuple *tuple1, SortTuple *tuple2,
 #define MKQS_COMPARE_DATUM_GETTER DatumGetInt32
 #include "mk_qsort_tuple_template.h"
 
-/* Compare two heap datums through the current SortSupport comparator. */
+/* Compare a heap tuple with a previously extracted pivot datum. */
 static pg_attribute_always_inline int
-mkqs_compare_heap_generic(SortTuple *tuple1, SortTuple *tuple2,
-						  SortSupport sortKey, Tuplesortstate *state)
+mkqs_compare_heap_generic_to_pivot(SortTuple *tuple, Datum pivotDatum,
+								   bool pivotIsNull,
+								   SortSupport sortKey,
+								   Tuplesortstate *state)
 {
-	Datum		datum1;
-	Datum		datum2;
-	bool		isNull1;
-	bool		isNull2;
+	Datum		datum;
+	bool		isNull;
 
-	mkqs_get_heap_datums(tuple1, tuple2, sortKey, state,
-						 &datum1, &isNull1, &datum2, &isNull2);
+	datum = mkqs_get_heap_datum(tuple, sortKey, state, &isNull);
 
-	return ApplySortComparator(datum1, isNull1,
-							   datum2, isNull2,
+	return ApplySortComparator(datum, isNull,
+							   pivotDatum, pivotIsNull,
 							   sortKey);
 }
 
@@ -367,18 +395,23 @@ mkqs_partition_heap_generic(SortTuple *x, size_t n, int depth,
 {
 	SortTuple  *pivot = x;
 	SortSupport sortKey = &state->base.sortKeys[depth];
+	Datum		pivotDatum;
+	bool		pivotIsNull;
 	int32		dist;
 
 	bounds->lessStart = 1;
 	bounds->lessEnd = 1;
 	bounds->greaterStart = n - 1;
 	bounds->greaterEnd = n - 1;
+	pivotDatum = mkqs_get_heap_datum(pivot, sortKey, state, &pivotIsNull);
 
 	MKQS_PARTITION_LOOP(
-		mkqs_compare_heap_generic(x + bounds->lessEnd,
-								  pivot, sortKey, state),
-		mkqs_compare_heap_generic(x + bounds->greaterStart,
-								  pivot, sortKey, state));
+		mkqs_compare_heap_generic_to_pivot(x + bounds->lessEnd,
+										 pivotDatum, pivotIsNull,
+										 sortKey, state),
+		mkqs_compare_heap_generic_to_pivot(x + bounds->greaterStart,
+										 pivotDatum, pivotIsNull,
+										 sortKey, state));
 	pg_unreachable();
 }
 
@@ -818,7 +851,7 @@ mkqs_depth_strictly_increasing(SortTuple *x, size_t n, int depth,
 }
 
 /* Find the median of three values */
-static pg_attribute_always_inline int
+static inline int
 get_median_from_three(int a,
 					  int b,
 					  int c,
