@@ -141,16 +141,6 @@ typedef int (*SortTupleComparator) (const SortTuple *a, const SortTuple *b,
 /* Multi-key quick sort */
 
 typedef void
-			(*MkqsGetDatumFunc) (const SortTuple *x1,
-								 const SortTuple *x2,
-								 const int depth,
-								 Tuplesortstate *state,
-								 Datum *datum1,
-								 bool *isNull1,
-								 Datum *datum2,
-								 bool *isNull2);
-
-typedef void
 			(*MkqsHandleDupFunc) (SortTuple *x,
 								  const int tupleCount,
 								  const bool seenNull,
@@ -255,12 +245,6 @@ typedef struct
 	 * Tuple representation supported by mk_qsort_tuple().
 	 */
 	MkqsTupleType mkqsTupleType;
-
-	/*
-	 * Function pointer for representations that cannot use the heap tuple
-	 * inline accessor. Used by mk_qsort_tuple().
-	 */
-	MkqsGetDatumFunc mkqsGetDatumFunc;
 
 	/*
 	 * Function pointer, referencing a function to handle duplicated tuple
@@ -436,6 +420,13 @@ extern void tuplesort_set_mkqsApplicable(Tuplesortstate *state,
 										 bool mkqsApplicable);
 
 /* tuplesortvariants.c */
+
+extern void mkqs_get_datum_index_btree(const SortTuple *x1,
+										const SortTuple *x2,
+										int depth,
+										Tuplesortstate *state,
+										Datum *datum1, bool *isNull1,
+										Datum *datum2, bool *isNull2);
 
 extern Tuplesortstate *tuplesort_begin_heap(TupleDesc tupDesc,
 											int nkeys, AttrNumber *attNums,

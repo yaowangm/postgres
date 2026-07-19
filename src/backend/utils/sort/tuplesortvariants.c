@@ -108,16 +108,6 @@ static void freestate_cluster(Tuplesortstate *state);
 
 
 static void
-mkqs_get_datum_index_btree(const SortTuple *x1,
-						   const SortTuple *x2,
-						   const int depth,
-						   Tuplesortstate *state,
-						   Datum *datum1,
-						   bool *isNull1,
-						   Datum *datum2,
-						   bool *isNull2);
-
-static void
 			mkqs_handle_dup_index_btree(SortTuple *x,
 										const int tupleCount,
 										const bool seenNull,
@@ -437,7 +427,6 @@ tuplesort_begin_index_btree(Relation heapRel,
 	base->comparetup = comparetup_index_btree;
 	base->comparetup_tiebreak = comparetup_index_btree_tiebreak;
 	base->mkqsTupleType = MKQS_TUPLE_TYPE_INDEX_BTREE;
-	base->mkqsGetDatumFunc = mkqs_get_datum_index_btree;
 	base->mkqsHandleDupFunc = mkqs_handle_dup_index_btree;
 	base->writetup = writetup_index;
 	base->readtup = readtup_index;
@@ -2108,21 +2097,18 @@ readtup_datum(Tuplesortstate *state, SortTuple *stup,
 }
 
 /*
- * Get specified datums from SortTuple (IndexTuple for btree index) list
+ * Get specified datums from SortTuple (IndexTuple for btree index) list.
  *
  * When x1 and x2 are provided by caller, two datums will be returned.
  * When x2 is NULL, only one datum will be returned.
  *
- * Note the function does not check leading sort key (tuple->datum1 and
- * tuple->isnull), which should be checked in other functions (e.g.
- * comparetup_mk()).
- *
- * See comparetup_index_btree() for details.
+ * Note the function does not check the leading sort key in datum1/isnull1;
+ * callers handle that separately.
  */
-static void
+void
 mkqs_get_datum_index_btree(const SortTuple *x1,
 						   const SortTuple *x2,
-						   const int depth,
+						   int depth,
 						   Tuplesortstate *state,
 						   Datum *datum1,
 						   bool *isNull1,
@@ -2130,25 +2116,20 @@ mkqs_get_datum_index_btree(const SortTuple *x1,
 						   bool *isNull2)
 {
 	TupleDesc	tupDesc;
-	IndexTuple	indexTuple1, indexTuple2;
+	IndexTuple	indexTuple1;
 	TuplesortPublic *base = TuplesortstateGetPublic(state);
 	TuplesortIndexBTreeArg *arg = (TuplesortIndexBTreeArg *) base->arg;
 
-	Assert(state);
 	Assert(x1);
 
 	tupDesc = RelationGetDescr(arg->index.indexRel);
 	indexTuple1 = (IndexTuple) x1->tuple;
-
-	/*
-	 * Set parameter attnum = depth + 1 because attnum starts from 1 but depth
-	 * starts from 0
-	 */
 	*datum1 = index_getattr(indexTuple1, depth + 1, tupDesc, isNull1);
 
 	if (x2 != NULL)
 	{
-		indexTuple2 = (IndexTuple) x2->tuple;
+		IndexTuple	indexTuple2 = (IndexTuple) x2->tuple;
+
 		*datum2 = index_getattr(indexTuple2, depth + 1, tupDesc, isNull2);
 	}
 }

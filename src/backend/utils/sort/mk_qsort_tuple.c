@@ -21,7 +21,7 @@
  */
 
 /* Swap two tuples in sort tuple array */
-static inline void
+static pg_attribute_always_inline void
 mkqs_swap(int a,
 		  int b,
 		  SortTuple *x)
@@ -36,7 +36,7 @@ mkqs_swap(int a,
 }
 
 /* Swap tuples by batch in sort tuple array */
-static inline void
+static pg_attribute_always_inline void
 mkqs_vec_swap(int a,
 			  int b,
 			  int size,
@@ -50,8 +50,12 @@ mkqs_vec_swap(int a,
 	}
 }
 
+/*
+ * Extract one or two datums at the given depth from btree index tuples.
+ * When x2 is NULL, only the first datum is returned.
+ */
 static pg_attribute_always_inline void
-mkqs_get_index_datum(const SortTuple *x1,
+mkqs_get_index_datums(const SortTuple *x1,
 					 const SortTuple *x2,
 					 int depth,
 					 Tuplesortstate *state,
@@ -63,9 +67,8 @@ mkqs_get_index_datum(const SortTuple *x1,
 	TuplesortPublic *base = &state->base;
 
 	Assert(base->mkqsTupleType == MKQS_TUPLE_TYPE_INDEX_BTREE);
-	Assert(base->mkqsGetDatumFunc != NULL);
-	base->mkqsGetDatumFunc(x1, x2, depth, state,
-						 datum1, isNull1, datum2, isNull2);
+	mkqs_get_datum_index_btree(x1, x2, depth, state,
+								 datum1, isNull1, datum2, isNull2);
 }
 
 /*
@@ -73,7 +76,7 @@ mkqs_get_index_datum(const SortTuple *x1,
  * Note that the input x means a specified tuple provided by caller but not
  * a tuple array, so tupleIndex is unnecessary.
  */
-static inline bool
+static pg_attribute_always_inline bool
 check_datum_null(SortTuple *x,
 				 int depth,
 				 Tuplesortstate *state)
@@ -99,12 +102,43 @@ check_datum_null(SortTuple *x,
 							 (TupleDesc) state->base.arg, &isNull);
 	}
 	else
-		mkqs_get_index_datum(x, NULL, depth, state,
+		mkqs_get_index_datums(x, NULL, depth, state,
 							 &datum, &isNull, NULL, NULL);
 
 	return isNull;
 }
 
+/*
+ * Compare NULL states according to sortKey.  Return true when NULL ordering
+ * determines the result, or false when both datums must be compared.
+ */
+static pg_attribute_always_inline bool
+mkqs_compare_nulls(bool isNull1, bool isNull2, SortSupport sortKey,
+				   int *compare)
+{
+	if (isNull1)
+	{
+		if (isNull2)
+			*compare = 0;
+		else if (sortKey->ssup_nulls_first)
+			*compare = -1;
+		else
+			*compare = 1;
+		return true;
+	}
+	else if (isNull2)
+	{
+		if (sortKey->ssup_nulls_first)
+			*compare = 1;
+		else
+			*compare = -1;
+		return true;
+	}
+
+	return false;
+}
+
+/* Apply a sort comparator, with fast paths for supported integer datums. */
 static inline int
 mkqs_apply_sort_comparator(Datum datum1,
 						   bool isNull1,
@@ -114,22 +148,8 @@ mkqs_apply_sort_comparator(Datum datum1,
 {
 	int			ret;
 
-	if (isNull1)
-	{
-		if (isNull2)
-			return 0;
-		else if (sortKey->ssup_nulls_first)
-			return -1;
-		else
-			return 1;
-	}
-	else if (isNull2)
-	{
-		if (sortKey->ssup_nulls_first)
-			return 1;
-		else
-			return -1;
-	}
+	if (mkqs_compare_nulls(isNull1, isNull2, sortKey, &ret))
+		return ret;
 
 #if SIZEOF_DATUM >= 8
 	if (sortKey->comparator == ssup_datum_signed_cmp)
@@ -168,6 +188,7 @@ mkqs_apply_sort_comparator(Datum datum1,
 	return ret;
 }
 
+/* Comparator implementation selected once at each partition boundary. */
 typedef enum MkqsPartitionCompareKind
 {
 	MKQS_PARTITION_COMPARE_GENERIC,
@@ -177,6 +198,7 @@ typedef enum MkqsPartitionCompareKind
 	MKQS_PARTITION_COMPARE_HEAP_INT32,
 } MkqsPartitionCompareKind;
 
+/* Extract the current sort-key datums from two heap tuples. */
 static pg_attribute_always_inline void
 mkqs_get_heap_datums(SortTuple *tuple1, SortTuple *tuple2,
 					 SortSupport sortKey, Tuplesortstate *state,
@@ -198,32 +220,7 @@ mkqs_get_heap_datums(SortTuple *tuple1, SortTuple *tuple2,
 						   (TupleDesc) state->base.arg, isNull2);
 }
 
-static pg_attribute_always_inline bool
-mkqs_compare_nulls(bool isNull1, bool isNull2, SortSupport sortKey,
-				   int *compare)
-{
-	if (isNull1)
-	{
-		if (isNull2)
-			*compare = 0;
-		else if (sortKey->ssup_nulls_first)
-			*compare = -1;
-		else
-			*compare = 1;
-		return true;
-	}
-	else if (isNull2)
-	{
-		if (sortKey->ssup_nulls_first)
-			*compare = 1;
-		else
-			*compare = -1;
-		return true;
-	}
-
-	return false;
-}
-
+/* Generate a heap comparator for one built-in integer representation. */
 #define MKQS_DEFINE_HEAP_COMPARATOR(name, ctype, datum_getter) \
 static pg_attribute_always_inline int \
 name(SortTuple *tuple1, SortTuple *tuple2, \
@@ -258,6 +255,7 @@ MKQS_DEFINE_HEAP_COMPARATOR(mkqs_compare_heap_int32, int32, DatumGetInt32)
 
 #undef MKQS_DEFINE_HEAP_COMPARATOR
 
+/* Compare two heap datums through the current SortSupport comparator. */
 static pg_attribute_always_inline int
 mkqs_compare_heap_generic(SortTuple *tuple1, SortTuple *tuple2,
 						  SortSupport sortKey, Tuplesortstate *state)
@@ -275,6 +273,7 @@ mkqs_compare_heap_generic(SortTuple *tuple1, SortTuple *tuple2,
 							   sortKey);
 }
 
+/* Select a fixed comparator path before entering a partition's hot loop. */
 static inline MkqsPartitionCompareKind
 mkqs_select_partition_compare_kind(Tuplesortstate *state, int depth)
 {
@@ -296,6 +295,7 @@ mkqs_select_partition_compare_kind(Tuplesortstate *state, int depth)
 	return MKQS_PARTITION_COMPARE_HEAP_GENERIC;
 }
 
+/* Boundaries of the equal, lesser, unprocessed, and greater partitions. */
 typedef struct MkqsPartitionBounds
 {
 	int			lessStart;
@@ -309,6 +309,7 @@ static pg_attribute_always_inline int comparetup_mk(SortTuple *a,
 												  int start_depth, int max_depth,
 												  Tuplesortstate *state);
 
+/* Generate the three-way partition loop for a fixed comparator expression. */
 #define MKQS_PARTITION_LOOP(compare_left, compare_right) \
 	do { \
 		while (true) \
@@ -493,7 +494,7 @@ comparetup_mk_index_btree_single(SortTuple *tuple1,
 	Assert(depth < state->base.nKeys);
 
 	sortKey = state->base.sortKeys + depth;
-	mkqs_get_index_datum(tuple1, tuple2, depth, state,
+	mkqs_get_index_datums(tuple1, tuple2, depth, state,
 						 &datum1, &isNull1, &datum2, &isNull2);
 
 	/*
