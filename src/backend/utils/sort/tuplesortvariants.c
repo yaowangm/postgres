@@ -119,11 +119,11 @@ static int
 										   Tuplesortstate *state);
 
 
-static inline int
+static pg_attribute_always_inline int
 			tuplesort_compare_by_item_pointer(const IndexTuple tuple1,
 											  const IndexTuple tuple2);
 
-static inline void
+static pg_attribute_always_inline void
 			raise_error_of_dup_index(IndexTuple x,
 									 Tuplesortstate *state);
 
@@ -2189,7 +2189,7 @@ mkqs_compare_equal_index_btree(const SortTuple *a,
 }
 
 /* Compare two index tuples by ItemPointer */
-static inline int
+static pg_attribute_always_inline int
 tuplesort_compare_by_item_pointer(const IndexTuple tuple1,
 								  const IndexTuple tuple2)
 {
@@ -2215,7 +2215,7 @@ tuplesort_compare_by_item_pointer(const IndexTuple tuple1,
 }
 
 /* Raise error for duplicated tuple when creating unique index */
-static inline void
+static pg_attribute_always_inline void
 raise_error_of_dup_index(IndexTuple x,
 						 Tuplesortstate *state)
 {

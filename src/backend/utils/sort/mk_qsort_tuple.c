@@ -139,7 +139,7 @@ mkqs_compare_nulls(bool isNull1, bool isNull2, SortSupport sortKey,
 }
 
 /* Apply a sort comparator, with fast paths for supported integer datums. */
-static inline int
+static pg_attribute_always_inline int
 mkqs_apply_sort_comparator(Datum datum1,
 						   bool isNull1,
 						   Datum datum2,
@@ -220,40 +220,22 @@ mkqs_get_heap_datums(SortTuple *tuple1, SortTuple *tuple2,
 						   (TupleDesc) state->base.arg, isNull2);
 }
 
-/* Generate a heap comparator for one built-in integer representation. */
-#define MKQS_DEFINE_HEAP_COMPARATOR(name, ctype, datum_getter) \
-static pg_attribute_always_inline int \
-name(SortTuple *tuple1, SortTuple *tuple2, \
-	 SortSupport sortKey, Tuplesortstate *state) \
-{ \
-	Datum		datum1; \
-	Datum		datum2; \
-	bool		isNull1; \
-	bool		isNull2; \
-	int			compare; \
- \
-	mkqs_get_heap_datums(tuple1, tuple2, sortKey, state, \
-						 &datum1, &isNull1, &datum2, &isNull2); \
-	if (!mkqs_compare_nulls(isNull1, isNull2, sortKey, &compare)) \
-	{ \
-		ctype		value1 = datum_getter(datum1); \
-		ctype		value2 = datum_getter(datum2); \
- \
-		compare = (value1 > value2) - (value1 < value2); \
-		if (sortKey->ssup_reverse) \
-			INVERT_COMPARE_RESULT(compare); \
-	} \
- \
-	return compare; \
-}
-
 #if SIZEOF_DATUM >= 8
-MKQS_DEFINE_HEAP_COMPARATOR(mkqs_compare_heap_signed, int64, DatumGetInt64)
-MKQS_DEFINE_HEAP_COMPARATOR(mkqs_compare_heap_unsigned, uint64, DatumGetUInt64)
-#endif
-MKQS_DEFINE_HEAP_COMPARATOR(mkqs_compare_heap_int32, int32, DatumGetInt32)
+#define MKQS_COMPARE mkqs_compare_heap_signed
+#define MKQS_COMPARE_TYPE int64
+#define MKQS_COMPARE_DATUM_GETTER DatumGetInt64
+#include "mk_qsort_tuple_template.h"
 
-#undef MKQS_DEFINE_HEAP_COMPARATOR
+#define MKQS_COMPARE mkqs_compare_heap_unsigned
+#define MKQS_COMPARE_TYPE uint64
+#define MKQS_COMPARE_DATUM_GETTER DatumGetUInt64
+#include "mk_qsort_tuple_template.h"
+#endif
+
+#define MKQS_COMPARE mkqs_compare_heap_int32
+#define MKQS_COMPARE_TYPE int32
+#define MKQS_COMPARE_DATUM_GETTER DatumGetInt32
+#include "mk_qsort_tuple_template.h"
 
 /* Compare two heap datums through the current SortSupport comparator. */
 static pg_attribute_always_inline int
@@ -274,7 +256,7 @@ mkqs_compare_heap_generic(SortTuple *tuple1, SortTuple *tuple2,
 }
 
 /* Select a fixed comparator path before entering a partition's hot loop. */
-static inline MkqsPartitionCompareKind
+static pg_attribute_always_inline MkqsPartitionCompareKind
 mkqs_select_partition_compare_kind(Tuplesortstate *state, int depth)
 {
 	SortSupport sortKey;
@@ -477,7 +459,7 @@ mkqs_partition(SortTuple *x, size_t n, int depth, Tuplesortstate *state,
  *
  * See comparetup_heap() for details.
  */
-static inline int
+static pg_attribute_always_inline int
 comparetup_mk_index_btree_single(SortTuple *tuple1,
 								 SortTuple *tuple2,
 								 int depth,
@@ -532,7 +514,7 @@ comparetup_mk_index_btree_single(SortTuple *tuple1,
  * The reason to use MkqsCompFuncType but not compare function pointers
  * directly is just for performance.
  */
-static inline int
+static pg_attribute_always_inline int
 mkqs_compare_datum_by_shortcut(SortTuple      *tuple1,
 							   SortTuple      *tuple2,
 							   Tuplesortstate *state)
@@ -836,7 +818,7 @@ mkqs_depth_strictly_increasing(SortTuple *x, size_t n, int depth,
 }
 
 /* Find the median of three values */
-static inline int
+static pg_attribute_always_inline int
 get_median_from_three(int a,
 					  int b,
 					  int c,
