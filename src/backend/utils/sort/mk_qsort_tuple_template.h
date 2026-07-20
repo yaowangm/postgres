@@ -37,7 +37,8 @@ MKQS_COMPARE(SortTuple *tuple1, SortTuple *tuple2,
 
 	mkqs_get_heap_datums(tuple1, tuple2, sortKey, state,
 						 &datum1, &isNull1, &datum2, &isNull2);
-	if (!mkqs_compare_nulls(isNull1, isNull2, sortKey, &compare))
+	compare = mkqs_compare_nulls(isNull1, isNull2, sortKey);
+	if (compare == MKQS_COMPARE_NONNULL)
 	{
 		MKQS_COMPARE_TYPE value1 = MKQS_COMPARE_DATUM_GETTER(datum1);
 		MKQS_COMPARE_TYPE value2 = MKQS_COMPARE_DATUM_GETTER(datum2);

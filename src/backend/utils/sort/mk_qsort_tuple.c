@@ -108,34 +108,25 @@ check_datum_null(SortTuple *x,
 	return isNull;
 }
 
-/*
- * Compare NULL states according to sortKey.  Return true when NULL ordering
- * determines the result, or false when both datums must be compared.
- */
-static pg_attribute_always_inline bool
-mkqs_compare_nulls(bool isNull1, bool isNull2, SortSupport sortKey,
-				   int *compare)
-{
-	if (isNull1)
-	{
-		if (isNull2)
-			*compare = 0;
-		else if (sortKey->ssup_nulls_first)
-			*compare = -1;
-		else
-			*compare = 1;
-		return true;
-	}
-	else if (isNull2)
-	{
-		if (sortKey->ssup_nulls_first)
-			*compare = 1;
-		else
-			*compare = -1;
-		return true;
-	}
+#define MKQS_COMPARE_NONNULL 2
 
-	return false;
+/*
+ * Compare NULL states according to sortKey.  Return MKQS_COMPARE_NONNULL when
+ * both datums must be compared.
+ */
+static pg_attribute_always_inline int
+mkqs_compare_nulls(bool isNull1, bool isNull2, SortSupport sortKey)
+{
+	if (!isNull1 && !isNull2)
+		return MKQS_COMPARE_NONNULL;
+
+	if (isNull1 && isNull2)
+		return 0;
+
+	if (isNull1 == sortKey->ssup_nulls_first)
+		return -1;
+
+	return 1;
 }
 
 /* Apply a sort comparator, with fast paths for supported integer datums. */
@@ -148,22 +139,9 @@ mkqs_apply_sort_comparator(Datum datum1,
 {
 	int			ret;
 
-	if (isNull1)
-	{
-		if (isNull2)
-			return 0;
-		else if (sortKey->ssup_nulls_first)
-			return -1;
-		else
-			return 1;
-	}
-	else if (isNull2)
-	{
-		if (sortKey->ssup_nulls_first)
-			return 1;
-		else
-			return -1;
-	}
+	ret = mkqs_compare_nulls(isNull1, isNull2, sortKey);
+	if (ret != MKQS_COMPARE_NONNULL)
+		return ret;
 
 #if SIZEOF_DATUM >= 8
 	if (sortKey->comparator == ssup_datum_signed_cmp)
