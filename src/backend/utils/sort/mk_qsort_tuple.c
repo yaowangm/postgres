@@ -319,161 +319,96 @@ static pg_attribute_always_inline int comparetup_mk(SortTuple *a,
 												  int start_depth, int max_depth,
 												  Tuplesortstate *state);
 
-/* Generate the three-way partition loop for a fixed comparator expression. */
-#define MKQS_PARTITION_LOOP(compare_left, compare_right) \
-	do { \
-		while (true) \
-		{ \
-			CHECK_FOR_INTERRUPTS(); \
- \
-			while (bounds->lessEnd <= bounds->greaterStart) \
-			{ \
-				dist = (compare_left); \
-				if (dist > 0) \
-					break; \
-				if (dist == 0) \
-				{ \
-					mkqs_swap(bounds->lessEnd, bounds->lessStart, x); \
-					bounds->lessStart++; \
-				} \
-				bounds->lessEnd++; \
-			} \
- \
-			while (bounds->lessEnd <= bounds->greaterStart) \
-			{ \
-				dist = (compare_right); \
-				if (dist < 0) \
-					break; \
-				if (dist == 0) \
-				{ \
-					mkqs_swap(bounds->greaterStart, bounds->greaterEnd, x); \
-					bounds->greaterEnd--; \
-				} \
-				bounds->greaterStart--; \
-			} \
- \
-			if (bounds->lessEnd > bounds->greaterStart) \
-				return; \
-			mkqs_swap(bounds->lessEnd, bounds->greaterStart, x); \
-			bounds->lessEnd++; \
-			bounds->greaterStart--; \
-		} \
-	} while (0)
-
 /*
  * Keep the generic comparator in the caller's code path.  Unlike the typed
  * cases, it does not benefit from dispatching to a specialized partition.
  */
-static pg_attribute_always_inline void
-mkqs_partition_generic(SortTuple *x, size_t n, int depth,
-					   Tuplesortstate *state, MkqsPartitionBounds *bounds)
-{
-	SortTuple  *pivot = x;
-	int32		dist;
-
-	bounds->lessStart = 1;
-	bounds->lessEnd = 1;
-	bounds->greaterStart = n - 1;
-	bounds->greaterEnd = n - 1;
-
-	MKQS_PARTITION_LOOP(
-		comparetup_mk(x + bounds->lessEnd, pivot,
-					  depth, depth, state),
-		comparetup_mk(x + bounds->greaterStart, pivot,
-					  depth, depth, state));
-	pg_unreachable();
-}
+#define MKQS_PARTITION mkqs_partition_generic
+#define MKQS_PARTITION_SCOPE static pg_attribute_always_inline
+#define MKQS_PARTITION_COMPARE(tuple) \
+	comparetup_mk((tuple), pivot, depth, depth, state)
+#include "mk_qsort_tuple_partition_template.h"
 
 /*
  * Heap generic comparators need neither tuple-representation dispatch nor
  * integer comparator detection once recursion has selected this depth.
  */
-static pg_attribute_always_inline void
-mkqs_partition_heap_generic(SortTuple *x, size_t n, int depth,
-							Tuplesortstate *state,
-							MkqsPartitionBounds *bounds)
-{
-	SortTuple  *pivot = x;
-	SortSupport sortKey = &state->base.sortKeys[depth];
-	Datum		pivotDatum;
+#define MKQS_PARTITION mkqs_partition_heap_generic
+#define MKQS_PARTITION_SCOPE static pg_attribute_always_inline
+#define MKQS_PARTITION_EXTRA_DECLARATIONS \
+	SortSupport sortKey; \
+	Datum		pivotDatum; \
 	bool		pivotIsNull;
-	int32		dist;
-
-	bounds->lessStart = 1;
-	bounds->lessEnd = 1;
-	bounds->greaterStart = n - 1;
-	bounds->greaterEnd = n - 1;
-	pivotDatum = mkqs_get_heap_datum(pivot, sortKey, state, &pivotIsNull);
-
-	MKQS_PARTITION_LOOP(
-		mkqs_compare_heap_generic_to_pivot(x + bounds->lessEnd,
-										 pivotDatum, pivotIsNull,
-										 sortKey, state),
-		mkqs_compare_heap_generic_to_pivot(x + bounds->greaterStart,
-										 pivotDatum, pivotIsNull,
-										 sortKey, state));
-	pg_unreachable();
-}
+#define MKQS_PARTITION_SETUP() \
+	do { \
+		sortKey = &state->base.sortKeys[depth]; \
+		pivotDatum = mkqs_get_heap_datum(pivot, sortKey, state, \
+										&pivotIsNull); \
+	} while (0)
+#define MKQS_PARTITION_COMPARE(tuple) \
+	mkqs_compare_heap_generic_to_pivot((tuple), pivotDatum, pivotIsNull, \
+									   sortKey, state)
+#include "mk_qsort_tuple_partition_template.h"
 
 /*
- * Split one partition using a comparison path selected by the caller.  The
- * specialized cases keep tuple access and integer comparison decisions out
- * of the inner loops; the generic case retains the complete comparator.
+ * Generate heap partition functions whose integer comparator is fixed before
+ * entering the hot loop.
  */
-static pg_noinline void
+#if SIZEOF_DATUM >= 8
+#define MKQS_PARTITION mkqs_partition_heap_signed
+#define MKQS_PARTITION_SCOPE static pg_noinline
+#define MKQS_PARTITION_EXTRA_DECLARATIONS SortSupport sortKey;
+#define MKQS_PARTITION_SETUP() \
+	(sortKey = &state->base.sortKeys[depth])
+#define MKQS_PARTITION_COMPARE(tuple) \
+	mkqs_compare_heap_signed((tuple), pivot, sortKey, state)
+#include "mk_qsort_tuple_partition_template.h"
+
+#define MKQS_PARTITION mkqs_partition_heap_unsigned
+#define MKQS_PARTITION_SCOPE static pg_noinline
+#define MKQS_PARTITION_EXTRA_DECLARATIONS SortSupport sortKey;
+#define MKQS_PARTITION_SETUP() \
+	(sortKey = &state->base.sortKeys[depth])
+#define MKQS_PARTITION_COMPARE(tuple) \
+	mkqs_compare_heap_unsigned((tuple), pivot, sortKey, state)
+#include "mk_qsort_tuple_partition_template.h"
+#endif
+
+#define MKQS_PARTITION mkqs_partition_heap_int32
+#define MKQS_PARTITION_SCOPE static pg_noinline
+#define MKQS_PARTITION_EXTRA_DECLARATIONS SortSupport sortKey;
+#define MKQS_PARTITION_SETUP() \
+	(sortKey = &state->base.sortKeys[depth])
+#define MKQS_PARTITION_COMPARE(tuple) \
+	mkqs_compare_heap_int32((tuple), pivot, sortKey, state)
+#include "mk_qsort_tuple_partition_template.h"
+
+/* Dispatch to a partition implementation selected at the recursion boundary. */
+static pg_attribute_always_inline void
 mkqs_partition(SortTuple *x, size_t n, int depth, Tuplesortstate *state,
 			   MkqsPartitionCompareKind compareKind,
 			   MkqsPartitionBounds *bounds)
 {
-	SortTuple  *pivot = x;
-	SortSupport sortKey = &state->base.sortKeys[depth];
-	int32		dist;
-
-	bounds->lessStart = 1;
-	bounds->lessEnd = 1;
-	bounds->greaterStart = n - 1;
-	bounds->greaterEnd = n - 1;
-
 	switch (compareKind)
 	{
-		case MKQS_PARTITION_COMPARE_GENERIC:
-			pg_unreachable();
-
-		case MKQS_PARTITION_COMPARE_HEAP_GENERIC:
-			pg_unreachable();
-
 #if SIZEOF_DATUM >= 8
 		case MKQS_PARTITION_COMPARE_HEAP_SIGNED:
-			MKQS_PARTITION_LOOP(
-				mkqs_compare_heap_signed(x + bounds->lessEnd,
-									 pivot, sortKey, state),
-				mkqs_compare_heap_signed(x + bounds->greaterStart,
-									 pivot, sortKey, state));
-			pg_unreachable();
-
+			mkqs_partition_heap_signed(x, n, depth, state, bounds);
+			return;
 		case MKQS_PARTITION_COMPARE_HEAP_UNSIGNED:
-			MKQS_PARTITION_LOOP(
-				mkqs_compare_heap_unsigned(x + bounds->lessEnd,
-									   pivot, sortKey, state),
-				mkqs_compare_heap_unsigned(x + bounds->greaterStart,
-									   pivot, sortKey, state));
-			pg_unreachable();
+			mkqs_partition_heap_unsigned(x, n, depth, state, bounds);
+			return;
 #endif
-
 		case MKQS_PARTITION_COMPARE_HEAP_INT32:
-			MKQS_PARTITION_LOOP(
-				mkqs_compare_heap_int32(x + bounds->lessEnd,
-									pivot, sortKey, state),
-				mkqs_compare_heap_int32(x + bounds->greaterStart,
-									pivot, sortKey, state));
+			mkqs_partition_heap_int32(x, n, depth, state, bounds);
+			return;
+		case MKQS_PARTITION_COMPARE_GENERIC:
+		case MKQS_PARTITION_COMPARE_HEAP_GENERIC:
 			pg_unreachable();
-
 	}
 
 	pg_unreachable();
 }
-
-#undef MKQS_PARTITION_LOOP
 
 /*
  * Compare two tuples at specified depth
