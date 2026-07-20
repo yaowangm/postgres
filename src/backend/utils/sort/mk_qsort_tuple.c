@@ -799,10 +799,8 @@ comparetup_mk(SortTuple *a, SortTuple *b,
 /*
  * Check whether the tuples are nondecreasing over the complete ordering.
  * Equality is safe because every depth that can affect the final order is
- * included.
- *
- * comparetup_mk() does not yet expose btree's implicit heap TID depth, so use
- * the btree variant's full comparator until that depth is represented here.
+ * included.  Use the standard full comparator so this scan has the same cost
+ * and semantics as qsort_tuple()'s presorted check.
  */
 static bool
 mkqs_full_order_presorted(SortTuple *x, size_t n, Tuplesortstate *state)
@@ -811,16 +809,8 @@ mkqs_full_order_presorted(SortTuple *x, size_t n, Tuplesortstate *state)
 
 	for (size_t i = 1; i < n; i++)
 	{
-		int			compare;
-
 		CHECK_FOR_INTERRUPTS();
-		if (state->base.mkqsTupleType == MKQS_TUPLE_TYPE_INDEX_BTREE)
-			compare = COMPARETUP(state, x + i - 1, x + i);
-		else
-			compare = comparetup_mk(x + i - 1, x + i, 0,
-									 state->base.nKeys - 1, state);
-
-		if (compare > 0)
+		if (COMPARETUP(state, x + i - 1, x + i) > 0)
 			return false;
 	}
 
