@@ -3066,7 +3066,7 @@ tuplesort_sort_memtuples(Tuplesortstate *state)
 		 * A summary of tuple types supported by mk qsort:
 		 *
 		 *  HeapTuple: supported
-		 *  IndexTuple(btree): supportedi
+		 *  IndexTuple(btree): supported
 		 *  IndexTuple(hash): not supported because there is only one key
 		 *  DatumTuple: not supported because there is only one key
 		 *  HeapTuple(for cluster): not supported yet

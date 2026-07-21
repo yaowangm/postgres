@@ -20,6 +20,32 @@
  * replacement of qsort_tuple() when specific conditions are satisfied.
  */
 
+#define MKQS_COMPARE_NONNULL 2
+
+/* Comparator implementation selected once at each partition boundary. */
+typedef enum MkqsPartitionCompareKind
+{
+	MKQS_PARTITION_COMPARE_GENERIC,
+	MKQS_PARTITION_COMPARE_HEAP_GENERIC,
+	MKQS_PARTITION_COMPARE_HEAP_SIGNED,
+	MKQS_PARTITION_COMPARE_HEAP_UNSIGNED,
+	MKQS_PARTITION_COMPARE_HEAP_INT32,
+} MkqsPartitionCompareKind;
+
+/* Boundaries of the equal, lesser, unprocessed, and greater partitions. */
+typedef struct MkqsPartitionBounds
+{
+	int			lessStart;
+	int			lessEnd;
+	int			greaterStart;
+	int			greaterEnd;
+} MkqsPartitionBounds;
+
+static pg_attribute_always_inline int comparetup_mk(SortTuple *a,
+												  SortTuple *b,
+												  int start_depth, int max_depth,
+												  Tuplesortstate *state);
+
 /* Swap two tuples in sort tuple array */
 static pg_attribute_always_inline void
 mkqs_swap(int a,
@@ -108,8 +134,6 @@ check_datum_null(SortTuple *x,
 	return isNull;
 }
 
-#define MKQS_COMPARE_NONNULL 2
-
 /*
  * Compare NULL states according to sortKey.  Return MKQS_COMPARE_NONNULL when
  * both datums must be compared.
@@ -179,16 +203,6 @@ mkqs_apply_sort_comparator(Datum datum1,
 
 	return ret;
 }
-
-/* Comparator implementation selected once at each partition boundary. */
-typedef enum MkqsPartitionCompareKind
-{
-	MKQS_PARTITION_COMPARE_GENERIC,
-	MKQS_PARTITION_COMPARE_HEAP_GENERIC,
-	MKQS_PARTITION_COMPARE_HEAP_SIGNED,
-	MKQS_PARTITION_COMPARE_HEAP_UNSIGNED,
-	MKQS_PARTITION_COMPARE_HEAP_INT32,
-} MkqsPartitionCompareKind;
 
 /* Extract the current sort-key datums from two heap tuples. */
 static pg_attribute_always_inline void
@@ -282,20 +296,6 @@ mkqs_select_partition_compare_kind(Tuplesortstate *state, int depth)
 
 	return MKQS_PARTITION_COMPARE_HEAP_GENERIC;
 }
-
-/* Boundaries of the equal, lesser, unprocessed, and greater partitions. */
-typedef struct MkqsPartitionBounds
-{
-	int			lessStart;
-	int			lessEnd;
-	int			greaterStart;
-	int			greaterEnd;
-} MkqsPartitionBounds;
-
-static pg_attribute_always_inline int comparetup_mk(SortTuple *a,
-												  SortTuple *b,
-												  int start_depth, int max_depth,
-												  Tuplesortstate *state);
 
 /*
  * Keep the generic comparator in the caller's code path.  Unlike the typed
@@ -469,24 +469,13 @@ mkqs_compare_datum_by_shortcut(SortTuple      *tuple1,
 	MkqsCompFuncType compFuncType = state->base.mkqsCompFuncType;
 	SortSupport sortKey = &state->base.sortKeys[0];
 
-	if (tuple1->isnull1)
-	{
-		if (tuple2->isnull1)
-			return 0;
-		else if (sortKey->ssup_nulls_first)
-			return -1;
-		else
-			return 1;
-	}
-	else if (tuple2->isnull1)
-	{
-		if (sortKey->ssup_nulls_first)
-			return 1;
-		else
-			return -1;
-	}
+	ret = mkqs_compare_nulls(tuple1->isnull1,
+                             tuple2->isnull1,
+                             sortKey);
+    if (ret != MKQS_COMPARE_NONNULL)
+        return ret;
 #if SIZEOF_DATUM >= 8
-	else if (compFuncType == MKQS_COMP_FUNC_SIGNED)
+	if (compFuncType == MKQS_COMP_FUNC_SIGNED)
 	{
 		int64		datum1 = DatumGetInt64(tuple1->datum1);
 		int64		datum2 = DatumGetInt64(tuple2->datum1);
@@ -754,7 +743,7 @@ mkqs_depth_strictly_increasing(SortTuple *x, size_t n, int depth,
 }
 
 /* Find the median of three values */
-static inline int
+static pg_attribute_always_inline int
 get_median_from_three(int a,
 					  int b,
 					  int c,
@@ -927,18 +916,15 @@ mk_qsort_tuple(SortTuple *x,
 		return;
 
 	/*
-	 * When the count < 16 and no need to handle duplicated tuples, use
-	 * bubble sort.
+	 * When the count < MKQS_INSERTION_SORT_THRESHOLD and no need to handle
+     * duplicated tuples, use insert sort.
 	 *
-	 * Use 16 instead of 7 which is used in standard qsort, because mk qsort
-	 * need more cost to maintain more complex state.
-	 *
-	 * Bubble sort is not applicable for scenario of handle duplicated tuples
+	 * Insert sort is not applicable for scenario of handle duplicated tuples
 	 * because it is difficult to check NULL effectively.
 	 *
 	 * No need to check for interrupts since the data size is pretty small.
 	 *
-	 * TODO: Can we check NULL for bubble sort with minimal cost?
+	 * TODO: Can we check NULL for insert sort with minimal cost?
 	 */
 	if (n < MKQS_INSERTION_SORT_THRESHOLD &&
 		!state->base.mkqsHandleDupFunc)
