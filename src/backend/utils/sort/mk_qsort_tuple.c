@@ -22,16 +22,6 @@
 
 #define MKQS_COMPARE_NONNULL 2
 
-/* Comparator implementation selected once at each partition boundary. */
-typedef enum MkqsPartitionCompareKind
-{
-	MKQS_PARTITION_COMPARE_GENERIC,
-	MKQS_PARTITION_COMPARE_HEAP_GENERIC,
-	MKQS_PARTITION_COMPARE_HEAP_SIGNED,
-	MKQS_PARTITION_COMPARE_HEAP_UNSIGNED,
-	MKQS_PARTITION_COMPARE_HEAP_INT32,
-} MkqsPartitionCompareKind;
-
 /* Boundaries of the equal, lesser, unprocessed, and greater partitions. */
 typedef struct MkqsPartitionBounds
 {
@@ -251,28 +241,6 @@ mkqs_compare_heap_generic_to_pivot(SortTuple *tuple, Datum pivotDatum,
 	return ApplySortComparator(datum, isNull,
 							   pivotDatum, pivotIsNull,
 							   sortKey);
-}
-
-/* Select a fixed comparator path before entering a partition's hot loop. */
-static pg_attribute_always_inline MkqsPartitionCompareKind
-mkqs_select_partition_compare_kind(Tuplesortstate *state, int depth)
-{
-	SortSupport sortKey;
-
-	if (state->base.mkqsTupleType != MKQS_TUPLE_TYPE_HEAP || depth == 0)
-		return MKQS_PARTITION_COMPARE_GENERIC;
-
-	sortKey = &state->base.sortKeys[depth];
-#if SIZEOF_DATUM >= 8
-	if (sortKey->comparator == ssup_datum_signed_cmp)
-		return MKQS_PARTITION_COMPARE_HEAP_SIGNED;
-	if (sortKey->comparator == ssup_datum_unsigned_cmp)
-		return MKQS_PARTITION_COMPARE_HEAP_UNSIGNED;
-#endif
-	if (sortKey->comparator == ssup_datum_int32_cmp)
-		return MKQS_PARTITION_COMPARE_HEAP_INT32;
-
-	return MKQS_PARTITION_COMPARE_HEAP_GENERIC;
 }
 
 /*
@@ -813,27 +781,23 @@ mk_qsort_tuple(SortTuple *x,
 	lessStart = get_median_from_three(l, m, r, x, depth, state);
 	mkqs_swap(0, lessStart, x);
 
-	switch (mkqs_select_partition_compare_kind(state, depth))
+	if (state->base.mkqsTupleType != MKQS_TUPLE_TYPE_HEAP || depth == 0)
+		mkqs_partition_generic(x, n, depth, state, &bounds);
+	else
 	{
-		case MKQS_PARTITION_COMPARE_GENERIC:
-			mkqs_partition_generic(x, n, depth, state, &bounds);
-			break;
-		case MKQS_PARTITION_COMPARE_HEAP_GENERIC:
-			mkqs_partition_heap_generic(x, n, depth, state, &bounds);
-			break;
+		SortSupport sortKey = &state->base.sortKeys[depth];
+
 #if SIZEOF_DATUM >= 8
-		case MKQS_PARTITION_COMPARE_HEAP_SIGNED:
+		if (sortKey->comparator == ssup_datum_signed_cmp)
 			mkqs_partition_heap_signed(x, n, depth, state, &bounds);
-			break;
-		case MKQS_PARTITION_COMPARE_HEAP_UNSIGNED:
+		else if (sortKey->comparator == ssup_datum_unsigned_cmp)
 			mkqs_partition_heap_unsigned(x, n, depth, state, &bounds);
-			break;
+		else
 #endif
-		case MKQS_PARTITION_COMPARE_HEAP_INT32:
+		if (sortKey->comparator == ssup_datum_int32_cmp)
 			mkqs_partition_heap_int32(x, n, depth, state, &bounds);
-			break;
-		default:
-			pg_unreachable();
+		else
+			mkqs_partition_heap_generic(x, n, depth, state, &bounds);
 	}
 
 	lessStart = bounds.lessStart;
