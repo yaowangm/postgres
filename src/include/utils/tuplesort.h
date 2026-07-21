@@ -73,7 +73,7 @@ typedef enum
 
 typedef enum
 {
-	MKQS_TUPLE_TYPE_NONE,
+	MKQS_TUPLE_TYPE_UNSUPPORTED,
 	MKQS_TUPLE_TYPE_HEAP,
 	MKQS_TUPLE_TYPE_INDEX_BTREE
 } MkqsTupleType;
@@ -415,9 +415,6 @@ extern void tuplesort_markpos(Tuplesortstate *state);
 extern void tuplesort_restorepos(Tuplesortstate *state);
 
 extern void *tuplesort_readtup_alloc(Tuplesortstate *state, Size tuplen);
-
-extern void tuplesort_set_mkqsApplicable(Tuplesortstate *state,
-										 bool mkqsApplicable);
 
 /* tuplesortvariants.c */
 

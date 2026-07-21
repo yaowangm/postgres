@@ -242,7 +242,6 @@ tuplesort_begin_heap(TupleDesc tupDesc,
 	base->comparetup = comparetup_heap;
 	base->comparetup_tiebreak = comparetup_heap_tiebreak;
 	base->mkqsTupleType = MKQS_TUPLE_TYPE_HEAP;
-	tuplesort_set_mkqsApplicable(state, true);
 	base->writetup = writetup_heap;
 	base->readtup = readtup_heap;
 	base->haveDatum1 = true;
@@ -426,7 +425,7 @@ tuplesort_begin_index_btree(Relation heapRel,
 	base->removeabbrev = removeabbrev_index;
 	base->comparetup = comparetup_index_btree;
 	base->comparetup_tiebreak = comparetup_index_btree_tiebreak;
-	base->mkqsTupleType = MKQS_TUPLE_TYPE_INDEX_BTREE;
+	base->mkqsTupleType = MKQS_TUPLE_TYPE_UNSUPPORTED;
 	base->mkqsHandleDupFunc = mkqs_handle_dup_index_btree;
 	base->writetup = writetup_index;
 	base->readtup = readtup_index;
@@ -438,7 +437,7 @@ tuplesort_begin_index_btree(Relation heapRel,
 	 * handling stays unchanged.
 	 */
 	if (base->nKeys > 1 && !enforceUnique)
-		tuplesort_set_mkqsApplicable(state, true);
+		base->mkqsTupleType = MKQS_TUPLE_TYPE_INDEX_BTREE;
 
 	arg->index.heapRel = heapRel;
 	arg->index.indexRel = indexRel;

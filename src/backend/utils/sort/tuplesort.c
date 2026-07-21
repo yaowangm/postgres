@@ -339,9 +339,6 @@ struct Tuplesortstate
 	/* Whether multi-key quick sort is used */
 	bool		mkqsUsed;
 
-	/* Should multi-key quick sort be used? Determined by optimizer. */
-	bool		mkqsApplicable;
-
 	/* The complete top-level presorted check was performed and failed. */
 	bool		mkqsTopPresortFailed;
 };
@@ -3055,27 +3052,23 @@ tuplesort_sort_memtuples(Tuplesortstate *state)
 		 * Apply multi-key quick sort when:
 		 *  1. enable_mk_sort is set
 		 *  2. There are multiple keys available
-		 *  3. mkqsTupleType is set, which implies that current tuple
-		 *     type is supported by mk qsort. (By now only Heap tuple and Btree
-		 *     Index tuple are supported, and more types may be supported in
-		 *     future.)
-		 *  4. The distinct value ratio of first row of sorted tuples must be
-		 *     satisfied, in which scenario mk qsort benefits mostly. See the
-		 *     following comments.
+		 *  3. mkqsTupleType identifies a tuple type supported by mk qsort.
+		 *     Currently heap tuples and non-unique btree index tuples are
+		 *     supported.
 		 *
 		 * A summary of tuple types supported by mk qsort:
 		 *
 		 *  HeapTuple: supported
-		 *  IndexTuple(btree): supported
+		 *  IndexTuple(btree): supported for non-unique builds
 		 *  IndexTuple(hash): not supported because there is only one key
 		 *  DatumTuple: not supported because there is only one key
 		 *  HeapTuple(for cluster): not supported yet
 		 *  IndexTuple(gist): not supported yet
 		 *  IndexTuple(brin): not supported yet
 		 */
-		if (state->mkqsApplicable &&
+		if (enable_mk_sort &&
 			state->base.nKeys > 1 &&
-			state->base.mkqsTupleType != MKQS_TUPLE_TYPE_NONE)
+			state->base.mkqsTupleType != MKQS_TUPLE_TYPE_UNSUPPORTED)
 		{
 			/*
 			 * Set relevant Datum Sort Comparator according to concrete data type
@@ -3613,11 +3606,4 @@ ssup_datum_int32_cmp(Datum x, Datum y, SortSupport ssup)
 		return 1;
 	else
 		return 0;
-}
-
-void
-tuplesort_set_mkqsApplicable(Tuplesortstate *state,
-							 bool mkqsApplicable)
-{
-	state->mkqsApplicable = mkqsApplicable && enable_mk_sort;
 }

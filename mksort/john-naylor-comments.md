@@ -192,7 +192,7 @@ mksort 中的一种特殊 duplicate action。
 
 ~~~c
 if (base->nKeys > 1 && !enforceUnique)
-    tuplesort_set_mkqsApplicable(state, true);
+    base->mkqsTupleType = MKQS_TUPLE_TYPE_INDEX_BTREE;
 ~~~
 
 因此第一阶段可以只支持当前可达的 non-unique btree 路径：

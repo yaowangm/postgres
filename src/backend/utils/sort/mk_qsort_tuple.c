@@ -718,7 +718,7 @@ mk_qsort_tuple(SortTuple *x,
 
 	Assert(depth <= state->base.nKeys);
 	Assert(state->base.sortKeys);
-	Assert(state->base.mkqsTupleType != MKQS_TUPLE_TYPE_NONE);
+	Assert(state->base.mkqsTupleType != MKQS_TUPLE_TYPE_UNSUPPORTED);
 
 	if (n <= 1)
 		return;
