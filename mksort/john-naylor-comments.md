@@ -382,8 +382,10 @@ recursive handling of equal groups”，而不是泛称 presorted check。
    full-order equality，并可以直接结束排序。
 2. **mkqs_depth_strictly_increasing()** 只比较当前 depth。它要求严格递增；
    equality 表示后续 depths 尚未检查，必须继续 partition 和 depth recursion。
-3. **mkqs_sort_presorted_leading_groups()** 检查 leading key nondecreasing，
-   允许 equality，但会显式地对每个 equal group 从下一 depth 继续排序。
+
+曾实现 leading-key nondecreasing scan，并从下一 depth 单独排序每个 equal
+group。该优化只适用于少于 **QSORT_THRESHOLD** 个 tuple、第一键非严格有序且
+后续键尚未有序的窄场景，因此已移除。
 
 原来的 **mkqsTopPresortChecked** 已改为 **mkqsTopPresortFailed**。generic
 top-level full-order scan 失败后直接设置该状态，不再额外执行一次必然得到

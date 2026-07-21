@@ -743,68 +743,6 @@ static void mk_qsort_tuple(SortTuple *x,
 						   bool seenNull);
 
 /*
- * Check whether the leading key is already nondecreasing while sorting each
- * completed equal-key group at the next depth.  If an inversion is found,
- * return false so that the caller sorts the whole array from the first key.
- */
-static bool
-mkqs_sort_presorted_leading_groups(SortTuple *x,
-								  size_t n,
-								  Tuplesortstate *state)
-{
-	size_t		group_start = 0;
-
-	Assert(state->base.nKeys > 1);
-
-	for (size_t i = 1; i < n; i++)
-	{
-		int			ret;
-
-		CHECK_FOR_INTERRUPTS();
-		ret = comparetup_mk(x + i - 1, x + i, 0, 0, state);
-
-		/* An inversion disproves the leading-key presort condition. */
-		if (ret > 0)
-			return false;
-
-		/* A greater key completes the preceding equal-key group. */
-		if (ret < 0)
-		{
-			size_t		group_size = i - group_start;
-
-			if (group_size > 1)
-			{
-				bool		isDatumNull;
-
-				isDatumNull = check_datum_null(x + group_start, 0, state);
-				mk_qsort_tuple(x + group_start,
-							   group_size,
-							   1,
-							   state,
-							   isDatumNull);
-			}
-
-			group_start = i;
-		}
-	}
-
-	/* Sort the final equal-key group, which has no following boundary. */
-	if (n - group_start > 1)
-	{
-		bool		isDatumNull;
-
-		isDatumNull = check_datum_null(x + group_start, 0, state);
-		mk_qsort_tuple(x + group_start,
-					   n - group_start,
-					   1,
-					   state,
-					   isDatumNull);
-	}
-
-	return true;
-}
-
-/*
  * Major of multi-key quick sort
  *
  * seenNull indicates whether we have seen NULL in any datum we checked
@@ -862,17 +800,6 @@ mk_qsort_tuple(SortTuple *x,
 			return;
 	}
 	else if (mkqs_depth_strictly_increasing(x, n, depth, state))
-		return;
-
-	/*
-	 * For radix-capable datums, preserve the existing first-key order and
-	 * sort only ties by the remaining keys.
-	 */
-	if (depth == 0 &&
-		state->base.nKeys > 1 &&
-		state->base.mkqsCompFuncType != MKQS_COMP_FUNC_GENERIC &&
-		!state->base.mkqsHandleDupFunc &&
-		mkqs_sort_presorted_leading_groups(x, n, state))
 		return;
 
 	/*
