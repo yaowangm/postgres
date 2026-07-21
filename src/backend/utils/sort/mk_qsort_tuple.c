@@ -339,33 +339,6 @@ mkqs_select_partition_compare_kind(Tuplesortstate *state, int depth)
 	mkqs_compare_heap_int32((tuple), pivot, sortKey, state)
 #include "mk_qsort_tuple_partition_template.h"
 
-/* Dispatch to a partition implementation selected at the recursion boundary. */
-static pg_attribute_always_inline void
-mkqs_partition(SortTuple *x, size_t n, int depth, Tuplesortstate *state,
-			   MkqsPartitionCompareKind compareKind,
-			   MkqsPartitionBounds *bounds)
-{
-	switch (compareKind)
-	{
-#if SIZEOF_DATUM >= 8
-		case MKQS_PARTITION_COMPARE_HEAP_SIGNED:
-			mkqs_partition_heap_signed(x, n, depth, state, bounds);
-			return;
-		case MKQS_PARTITION_COMPARE_HEAP_UNSIGNED:
-			mkqs_partition_heap_unsigned(x, n, depth, state, bounds);
-			return;
-#endif
-		case MKQS_PARTITION_COMPARE_HEAP_INT32:
-			mkqs_partition_heap_int32(x, n, depth, state, bounds);
-			return;
-		case MKQS_PARTITION_COMPARE_GENERIC:
-		case MKQS_PARTITION_COMPARE_HEAP_GENERIC:
-			pg_unreachable();
-	}
-
-	pg_unreachable();
-}
-
 /*
  * Compare two tuples at specified depth
  *
@@ -772,7 +745,6 @@ mk_qsort_tuple(SortTuple *x,
 				m, l, r, d;
 	int32		dist;
 	bool		isDatumNull;
-	MkqsPartitionCompareKind compareKind;
 	MkqsPartitionBounds bounds;
 
 
@@ -841,13 +813,28 @@ mk_qsort_tuple(SortTuple *x,
 	lessStart = get_median_from_three(l, m, r, x, depth, state);
 	mkqs_swap(0, lessStart, x);
 
-	compareKind = mkqs_select_partition_compare_kind(state, depth);
-	if (compareKind == MKQS_PARTITION_COMPARE_GENERIC)
-		mkqs_partition_generic(x, n, depth, state, &bounds);
-	else if (compareKind == MKQS_PARTITION_COMPARE_HEAP_GENERIC)
-		mkqs_partition_heap_generic(x, n, depth, state, &bounds);
-	else
-		mkqs_partition(x, n, depth, state, compareKind, &bounds);
+	switch (mkqs_select_partition_compare_kind(state, depth))
+	{
+		case MKQS_PARTITION_COMPARE_GENERIC:
+			mkqs_partition_generic(x, n, depth, state, &bounds);
+			break;
+		case MKQS_PARTITION_COMPARE_HEAP_GENERIC:
+			mkqs_partition_heap_generic(x, n, depth, state, &bounds);
+			break;
+#if SIZEOF_DATUM >= 8
+		case MKQS_PARTITION_COMPARE_HEAP_SIGNED:
+			mkqs_partition_heap_signed(x, n, depth, state, &bounds);
+			break;
+		case MKQS_PARTITION_COMPARE_HEAP_UNSIGNED:
+			mkqs_partition_heap_unsigned(x, n, depth, state, &bounds);
+			break;
+#endif
+		case MKQS_PARTITION_COMPARE_HEAP_INT32:
+			mkqs_partition_heap_int32(x, n, depth, state, &bounds);
+			break;
+		default:
+			pg_unreachable();
+	}
 
 	lessStart = bounds.lessStart;
 	lessEnd = bounds.lessEnd;
