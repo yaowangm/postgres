@@ -204,28 +204,6 @@ mkqs_apply_sort_comparator(Datum datum1,
 	return ret;
 }
 
-/* Extract the current sort-key datums from two heap tuples. */
-static pg_attribute_always_inline void
-mkqs_get_heap_datums(SortTuple *tuple1, SortTuple *tuple2,
-					 SortSupport sortKey, Tuplesortstate *state,
-					 Datum *datum1, bool *isNull1,
-					 Datum *datum2, bool *isNull2)
-{
-	HeapTupleData ltup;
-	HeapTupleData rtup;
-
-	ltup.t_len = ((MinimalTuple) tuple1->tuple)->t_len + MINIMAL_TUPLE_OFFSET;
-	ltup.t_data = (HeapTupleHeader) ((char *) tuple1->tuple -
-		MINIMAL_TUPLE_OFFSET);
-	rtup.t_len = ((MinimalTuple) tuple2->tuple)->t_len + MINIMAL_TUPLE_OFFSET;
-	rtup.t_data = (HeapTupleHeader) ((char *) tuple2->tuple -
-		MINIMAL_TUPLE_OFFSET);
-	*datum1 = heap_getattr(&ltup, sortKey->ssup_attno,
-						   (TupleDesc) state->base.arg, isNull1);
-	*datum2 = heap_getattr(&rtup, sortKey->ssup_attno,
-						   (TupleDesc) state->base.arg, isNull2);
-}
-
 /* Extract the current sort-key datum from one heap tuple. */
 static pg_attribute_always_inline Datum
 mkqs_get_heap_datum(SortTuple *tuple, SortSupport sortKey,
@@ -758,27 +736,6 @@ get_median_from_three(int a,
 				b : (comparetup_mk(x + a, x + c, depth, depth, state) < 0 ? a : c));
 }
 
-#ifdef USE_ASSERT_CHECKING
-/*
- * Verify whether the SortTuple list is ordered or not at specified depth
- */
-static void
-mkqs_verify(SortTuple *x,
-			int n,
-			int depth,
-			Tuplesortstate *state)
-{
-	int			ret;
-
-	for (int i = 0; i < n - 1; i++)
-	{
-		ret = comparetup_mk(x + i, x + i + 1,
-							depth, depth, state);
-		Assert(ret <= 0);
-	}
-}
-#endif
-
 static void mk_qsort_tuple(SortTuple *x,
 						   size_t n,
 						   int depth,
@@ -786,9 +743,9 @@ static void mk_qsort_tuple(SortTuple *x,
 						   bool seenNull);
 
 /*
- * If the leading key is already nondecreasing, avoid re-partitioning it.
- * The caller can keep the existing first-key order and recurse only within
- * each equal-key group.
+ * Check whether the leading key is already nondecreasing while sorting each
+ * completed equal-key group at the next depth.  If an inversion is found,
+ * return false so that the caller sorts the whole array from the first key.
  */
 static bool
 mkqs_sort_presorted_leading_groups(SortTuple *x,
@@ -806,9 +763,11 @@ mkqs_sort_presorted_leading_groups(SortTuple *x,
 		CHECK_FOR_INTERRUPTS();
 		ret = comparetup_mk(x + i - 1, x + i, 0, 0, state);
 
+		/* An inversion disproves the leading-key presort condition. */
 		if (ret > 0)
 			return false;
 
+		/* A greater key completes the preceding equal-key group. */
 		if (ret < 0)
 		{
 			size_t		group_size = i - group_start;
@@ -829,6 +788,7 @@ mkqs_sort_presorted_leading_groups(SortTuple *x,
 		}
 	}
 
+	/* Sort the final equal-key group, which has no following boundary. */
 	if (n - group_start > 1)
 	{
 		bool		isDatumNull;
@@ -1047,10 +1007,4 @@ mk_qsort_tuple(SortTuple *x,
 				   state,
 				   seenNull);
 
-#ifdef USE_ASSERT_CHECKING
-	mkqs_verify(x,
-				n,
-				depth,
-				state);
-#endif
 }
