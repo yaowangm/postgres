@@ -80,9 +80,7 @@ mkqs_get_index_datums(const SortTuple *x1,
 					 Datum *datum2,
 					 bool *isNull2)
 {
-	TuplesortPublic *base = &state->base;
-
-	Assert(base->mkqsTupleType == MKQS_TUPLE_TYPE_INDEX_BTREE);
+	Assert(state->base.mkqsTupleType == MKQS_TUPLE_TYPE_INDEX_BTREE);
 	mkqs_get_datum_index_btree(x1, x2, depth, state,
 								 datum1, isNull1, datum2, isNull2);
 }
@@ -501,32 +499,12 @@ comparetup_mk_heap(SortTuple *a, SortTuple *b,
 
 /* Compare an inclusive range of btree index tuple sort-key depths. */
 static int
-comparetup_mk_index_btree(SortTuple *a, SortTuple *b,
-						 int start_depth, int max_depth,
-						 Tuplesortstate *state)
+comparetup_mk_index_btree_range(SortTuple *a, SortTuple *b,
+							   int start_depth, int max_depth,
+							   Tuplesortstate *state)
 {
 	int			depth = start_depth;
 	int			compare;
-
-	Assert(state->base.mkqsTupleType == MKQS_TUPLE_TYPE_INDEX_BTREE);
-	Assert(start_depth >= 0);
-	Assert(start_depth <= max_depth);
-	Assert(max_depth < state->base.nKeys);
-
-	if (depth == 0)
-	{
-		compare = mkqs_compare_datum_by_shortcut(a, b, state);
-
-		if (compare != 0)
-			return compare;
-
-		if (!state->base.sortKeys->abbrev_converter)
-		{
-			if (max_depth == 0)
-				return 0;
-			depth = 1;
-		}
-	}
 
 	for (; depth <= max_depth; depth++)
 	{
@@ -536,6 +514,36 @@ comparetup_mk_index_btree(SortTuple *a, SortTuple *b,
 	}
 
 	return 0;
+}
+
+/* Compare the leading key inline before entering the range comparator. */
+static pg_attribute_always_inline int
+comparetup_mk_index_btree(SortTuple *a, SortTuple *b,
+							 int start_depth, int max_depth,
+							 Tuplesortstate *state)
+{
+	int			compare;
+
+	Assert(state->base.mkqsTupleType == MKQS_TUPLE_TYPE_INDEX_BTREE);
+	Assert(start_depth >= 0);
+	Assert(start_depth <= max_depth);
+	Assert(max_depth < state->base.nKeys);
+
+	if (start_depth != 0)
+		return comparetup_mk_index_btree_range(a, b, start_depth,
+											 max_depth, state);
+
+	compare = mkqs_compare_datum_by_shortcut(a, b, state);
+	if (compare != 0)
+		return compare;
+
+	if (state->base.sortKeys->abbrev_converter)
+		return comparetup_mk_index_btree_range(a, b, 0, max_depth, state);
+
+	if (max_depth == 0)
+		return 0;
+
+	return comparetup_mk_index_btree_range(a, b, 1, max_depth, state);
 }
 
 /* Compare an inclusive range of sort-key depths. */
