@@ -52,7 +52,7 @@ mkqs_swap(int a,
 }
 
 /* Swap tuples by batch in sort tuple array */
-static pg_attribute_always_inline void
+static inline void
 mkqs_vec_swap(int a,
 			  int b,
 			  int size,
@@ -90,7 +90,7 @@ mkqs_get_index_datums(const SortTuple *x1,
  * Note that the input x means a specified tuple provided by caller but not
  * a tuple array, so tupleIndex is unnecessary.
  */
-static pg_attribute_always_inline bool
+static inline bool
 check_datum_null(SortTuple *x,
 				 int depth,
 				 Tuplesortstate *state)
@@ -142,7 +142,7 @@ mkqs_compare_nulls(bool isNull1, bool isNull2, SortSupport sortKey)
 }
 
 /* Apply a sort comparator, with fast paths for supported integer datums. */
-static pg_attribute_always_inline int
+static inline int
 mkqs_apply_sort_comparator(Datum datum1,
 						   bool isNull1,
 						   Datum datum2,

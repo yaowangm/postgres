@@ -123,7 +123,7 @@ static pg_attribute_always_inline int
 			tuplesort_compare_by_item_pointer(const IndexTuple tuple1,
 											  const IndexTuple tuple2);
 
-static pg_attribute_always_inline void
+static inline void
 			raise_error_of_dup_index(IndexTuple x,
 									 Tuplesortstate *state);
 
@@ -2214,7 +2214,7 @@ tuplesort_compare_by_item_pointer(const IndexTuple tuple1,
 }
 
 /* Raise error for duplicated tuple when creating unique index */
-static pg_attribute_always_inline void
+static inline void
 raise_error_of_dup_index(IndexTuple x,
 						 Tuplesortstate *state)
 {
