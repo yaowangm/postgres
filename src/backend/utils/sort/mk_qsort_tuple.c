@@ -425,10 +425,11 @@ mkqs_compare_datum_by_shortcut(SortTuple      *tuple1,
 	return ret;
 }
 
-static int
-comparetup_mk_heap_range(SortTuple *a, SortTuple *b,
-						int start_depth, int max_depth,
-						Tuplesortstate *state)
+/* Compare an inclusive range of heap tuple sort-key depths. */
+static inline int
+comparetup_mk_heap(SortTuple *a, SortTuple *b,
+				   int start_depth, int max_depth,
+				   Tuplesortstate *state)
 {
 	TuplesortPublic *base = &state->base;
 	HeapTupleData ltup;
@@ -496,60 +497,6 @@ comparetup_mk_heap_range(SortTuple *a, SortTuple *b,
 	}
 
 	return 0;
-}
-
-/* Compare heap tuples at exactly one sort-key depth. */
-static pg_attribute_always_inline int
-comparetup_mk_heap_single(SortTuple *a, SortTuple *b,
-						 int depth, Tuplesortstate *state)
-{
-	TuplesortPublic *base = &state->base;
-	SortSupport sortKey = &base->sortKeys[depth];
-	HeapTupleData ltup;
-	HeapTupleData rtup;
-	Datum		datum1;
-	Datum		datum2;
-	bool		isnull1;
-	bool		isnull2;
-	int32		compare;
-
-	Assert(depth >= 0);
-	Assert(depth < base->nKeys);
-
-	if (depth == 0)
-	{
-		compare = mkqs_compare_datum_by_shortcut(a, b, state);
-		if (compare != 0 || !sortKey->abbrev_converter)
-			return compare;
-	}
-
-	ltup.t_len = ((MinimalTuple) a->tuple)->t_len + MINIMAL_TUPLE_OFFSET;
-	ltup.t_data = (HeapTupleHeader) ((char *) a->tuple - MINIMAL_TUPLE_OFFSET);
-	rtup.t_len = ((MinimalTuple) b->tuple)->t_len + MINIMAL_TUPLE_OFFSET;
-	rtup.t_data = (HeapTupleHeader) ((char *) b->tuple - MINIMAL_TUPLE_OFFSET);
-	datum1 = heap_getattr(&ltup, sortKey->ssup_attno,
-						  (TupleDesc) base->arg, &isnull1);
-	datum2 = heap_getattr(&rtup, sortKey->ssup_attno,
-						  (TupleDesc) base->arg, &isnull2);
-
-	if (depth == 0)
-		return ApplySortAbbrevFullComparator(datum1, isnull1,
-										 datum2, isnull2, sortKey);
-
-	return mkqs_apply_sort_comparator(datum1, isnull1,
-								  datum2, isnull2, sortKey);
-}
-
-/* Compare an inclusive range of heap tuple sort-key depths. */
-static pg_attribute_always_inline int
-comparetup_mk_heap(SortTuple *a, SortTuple *b,
-				   int start_depth, int max_depth,
-				   Tuplesortstate *state)
-{
-	if (start_depth == max_depth)
-		return comparetup_mk_heap_single(a, b, start_depth, state);
-
-	return comparetup_mk_heap_range(a, b, start_depth, max_depth, state);
 }
 
 /* Compare an inclusive range of btree index tuple sort-key depths. */
