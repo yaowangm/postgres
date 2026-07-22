@@ -479,20 +479,6 @@ comparetup_mk_heap_range(SortTuple *a, SortTuple *b,
 		depth = 1;
 	}
 
-	if (depth == max_depth)
-	{
-		SortSupport sortKey = &base->sortKeys[depth];
-		Datum		datum1;
-		Datum		datum2;
-		bool		isnull1;
-		bool		isnull2;
-
-		datum1 = heap_getattr(&ltup, sortKey->ssup_attno, tupDesc, &isnull1);
-		datum2 = heap_getattr(&rtup, sortKey->ssup_attno, tupDesc, &isnull2);
-		return mkqs_apply_sort_comparator(datum1, isnull1,
-										  datum2, isnull2, sortKey);
-	}
-
 	for (; depth <= max_depth; depth++)
 	{
 		SortSupport sortKey = &base->sortKeys[depth];
