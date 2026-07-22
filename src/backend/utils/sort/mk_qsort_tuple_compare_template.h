@@ -1,6 +1,6 @@
 /*-------------------------------------------------------------------------
  *
- * mk_qsort_tuple_template.h
+ * mk_qsort_tuple_compare_template.h
  *	  Template for a heap tuple comparator used by multi-key quicksort.
  *
  * Copyright (c) 2026, PostgreSQL Global Development Group
@@ -15,7 +15,7 @@
  *	  - MKQS_COMPARE_DATUM_GETTER - convert Datum to MKQS_COMPARE_TYPE
  *
  * IDENTIFICATION
- *	  src/backend/utils/sort/mk_qsort_tuple_template.h
+ *	  src/backend/utils/sort/mk_qsort_tuple_compare_template.h
  *
  *-------------------------------------------------------------------------
  */

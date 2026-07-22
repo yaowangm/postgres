@@ -104,7 +104,6 @@
 #include "access/htup_details.h"
 #include "commands/tablespace.h"
 #include "miscadmin.h"
-#include "optimizer/cost.h"
 #include "pg_trace.h"
 #include "port/pg_bitutils.h"
 #include "storage/shmem.h"

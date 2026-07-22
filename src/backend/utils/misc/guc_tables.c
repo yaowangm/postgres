@@ -103,6 +103,7 @@
 #include "utils/plancache.h"
 #include "utils/ps_status.h"
 #include "utils/rls.h"
+#include "utils/tuplesort.h"
 #include "utils/xml.h"
 
 #ifdef TRACE_SYNCSCAN

@@ -211,18 +211,18 @@ mkqs_get_heap_datum(SortTuple *tuple, SortSupport sortKey,
 #define MKQS_COMPARE mkqs_compare_heap_signed
 #define MKQS_COMPARE_TYPE int64
 #define MKQS_COMPARE_DATUM_GETTER DatumGetInt64
-#include "mk_qsort_tuple_template.h"
+#include "mk_qsort_tuple_compare_template.h"
 
 #define MKQS_COMPARE mkqs_compare_heap_unsigned
 #define MKQS_COMPARE_TYPE uint64
 #define MKQS_COMPARE_DATUM_GETTER DatumGetUInt64
-#include "mk_qsort_tuple_template.h"
+#include "mk_qsort_tuple_compare_template.h"
 #endif
 
 #define MKQS_COMPARE mkqs_compare_heap_int32
 #define MKQS_COMPARE_TYPE int32
 #define MKQS_COMPARE_DATUM_GETTER DatumGetInt32
-#include "mk_qsort_tuple_template.h"
+#include "mk_qsort_tuple_compare_template.h"
 
 /* Compare a heap tuple with a previously extracted pivot datum. */
 static pg_attribute_always_inline int

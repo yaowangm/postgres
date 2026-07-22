@@ -33,6 +33,8 @@
 typedef struct BrinTuple BrinTuple;
 typedef struct GinTuple GinTuple;
 
+extern PGDLLIMPORT bool enable_mk_sort;
+
 /*
  * Tuplesortstate and Sharedsort are opaque types whose details are not
  * known outside tuplesort.c.

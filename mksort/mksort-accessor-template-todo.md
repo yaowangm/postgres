@@ -33,14 +33,14 @@
 
 ### 1. 把算法主体整理成模板
 
-将当前 mksort 的公共算法主体放入类似 `mk_qsort_tuple_template.h` 的模板文件。模板只暴露少量 policy macro，例如：
+将当前 mksort 的公共算法主体放入类似 `mk_qsort_tuple_compare_template.h` 的模板文件。模板只暴露少量 policy macro，例如：
 
 ```c
 #define MKQS_NAME              mk_qsort_tuple_heap
 #define MKQS_GET_DATUM         mkqs_get_datum_heap
 #define MKQS_CHECK_NULL        mkqs_check_null_heap
 #define MKQS_HANDLE_DUP        mkqs_handle_dup_heap
-#include "mk_qsort_tuple_template.h"
+#include "mk_qsort_tuple_compare_template.h"
 ```
 
 index btree 可以用另一组 policy 重新实例化：
@@ -50,7 +50,7 @@ index btree 可以用另一组 policy 重新实例化：
 #define MKQS_GET_DATUM         mkqs_get_datum_index_btree
 #define MKQS_CHECK_NULL        mkqs_check_null_index_btree
 #define MKQS_HANDLE_DUP        mkqs_handle_dup_index_btree
-#include "mk_qsort_tuple_template.h"
+#include "mk_qsort_tuple_compare_template.h"
 ```
 
 模板展开后生成两份专用函数，但 pivot、partition、presort 和递归逻辑只维护一份模板源码。
