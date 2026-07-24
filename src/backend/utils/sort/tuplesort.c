@@ -3078,6 +3078,9 @@ tuplesort_sort_memtuples(Tuplesortstate *state)
 				if (state->base.sortKeys[0].abbrev_converter != NULL)
 					state->base.mkqsCompFuncType = MKQS_COMP_FUNC_GENERIC;
 #if SIZEOF_DATUM >= 8
+				else if (state->base.sortKeys[0].comparator ==
+						 ssup_datum_unsigned_cmp)
+					state->base.mkqsCompFuncType = MKQS_COMP_FUNC_UNSIGNED;
 				else if (state->base.sortKeys[0].comparator == ssup_datum_signed_cmp)
 					state->base.mkqsCompFuncType = MKQS_COMP_FUNC_SIGNED;
 #endif

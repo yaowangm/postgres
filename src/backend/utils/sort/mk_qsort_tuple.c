@@ -389,13 +389,20 @@ mkqs_compare_datum_by_shortcut(SortTuple      *tuple1,
 	ret = mkqs_compare_nulls(tuple1->isnull1,
                              tuple2->isnull1,
                              sortKey);
-    if (ret != MKQS_COMPARE_NONNULL)
-        return ret;
+	if (ret != MKQS_COMPARE_NONNULL)
+		return ret;
 #if SIZEOF_DATUM >= 8
 	else if (compFuncType == MKQS_COMP_FUNC_SIGNED)
 	{
 		int64		datum1 = DatumGetInt64(tuple1->datum1);
 		int64		datum2 = DatumGetInt64(tuple2->datum1);
+
+		ret = (datum1 > datum2) - (datum1 < datum2);
+	}
+	else if (compFuncType == MKQS_COMP_FUNC_UNSIGNED)
+	{
+		uint64		datum1 = DatumGetUInt64(tuple1->datum1);
+		uint64		datum2 = DatumGetUInt64(tuple2->datum1);
 
 		ret = (datum1 > datum2) - (datum1 < datum2);
 	}
@@ -409,6 +416,7 @@ mkqs_compare_datum_by_shortcut(SortTuple      *tuple1,
 	}
 	else
 	{
+		/* Small direct unsigned sorts retain the standard comparator path. */
 		Assert(compFuncType == MKQS_COMP_FUNC_GENERIC);
 		return ApplySortComparator(tuple1->datum1,
 								   tuple1->isnull1,

@@ -68,6 +68,7 @@ typedef struct SortCoordinateData *SortCoordinate;
 typedef enum
 {
 	MKQS_COMP_FUNC_GENERIC,
+	MKQS_COMP_FUNC_UNSIGNED,
 	MKQS_COMP_FUNC_SIGNED,
 	MKQS_COMP_FUNC_INT32
 } MkqsCompFuncType;
