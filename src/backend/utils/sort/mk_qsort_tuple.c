@@ -180,11 +180,7 @@ mkqs_apply_sort_comparator(Datum datum1,
 		ret = (value1 > value2) - (value1 < value2);
 	}
 	else
-		return ApplySortComparator(datum1,
-								   isNull1,
-								   datum2,
-								   isNull2,
-								   sortKey);
+		ret = sortKey->comparator(datum1, datum2, sortKey);
 
 	if (sortKey->ssup_reverse)
 		INVERT_COMPARE_RESULT(ret);
@@ -418,11 +414,9 @@ mkqs_compare_datum_by_shortcut(SortTuple      *tuple1,
 	{
 		/* Small direct unsigned sorts retain the standard comparator path. */
 		Assert(compFuncType == MKQS_COMP_FUNC_GENERIC);
-		return ApplySortComparator(tuple1->datum1,
-								   tuple1->isnull1,
-								   tuple2->datum1,
-								   tuple2->isnull1,
-								   sortKey);
+		ret = sortKey->comparator(tuple1->datum1,
+								  tuple2->datum1,
+								  sortKey);
 	}
 
 	if (sortKey->ssup_reverse)
@@ -452,12 +446,25 @@ comparetup_mk_heap(SortTuple *a, SortTuple *b,
 	{
 		SortSupport sortKey = &base->sortKeys[0];
 
+		/*
+		 * datum1 contains either the full leading key or its abbreviated
+		 * representation.  A nonzero abbreviated comparison is conclusive,
+		 * but zero does not establish that the full values are equal.
+		 */
 		compare = mkqs_compare_datum_by_shortcut(a, b, state);
 		if (compare != 0)
 			return compare;
 
 		if (!sortKey->abbrev_converter)
 		{
+			if (max_depth == 0)
+				return 0;
+			depth = 1;
+		}
+		else if (a->isnull1)
+		{
+			/* Both leading keys are NULL, so no full comparison is needed. */
+			Assert(b->isnull1);
 			if (max_depth == 0)
 				return 0;
 			depth = 1;
@@ -477,10 +484,17 @@ comparetup_mk_heap(SortTuple *a, SortTuple *b,
 		bool		isnull1;
 		bool		isnull2;
 
+		/*
+		 * The abbreviated keys compared equal, so compare their full,
+		 * necessarily non-NULL values.  Calling the comparator directly
+		 * avoids repeating the NULL checks performed above.
+		 */
 		datum1 = heap_getattr(&ltup, sortKey->ssup_attno, tupDesc, &isnull1);
 		datum2 = heap_getattr(&rtup, sortKey->ssup_attno, tupDesc, &isnull2);
-		compare = ApplySortAbbrevFullComparator(datum1, isnull1,
-										 datum2, isnull2, sortKey);
+		Assert(!isnull1 && !isnull2);
+		compare = sortKey->abbrev_full_comparator(datum1, datum2, sortKey);
+		if (sortKey->ssup_reverse)
+			INVERT_COMPARE_RESULT(compare);
 		if (compare != 0 || max_depth == 0)
 			return compare;
 		depth = 1;
