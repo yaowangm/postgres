@@ -306,7 +306,7 @@ mkqs_compare_heap_generic_to_pivot(SortTuple *tuple, Datum pivotDatum,
 #include "mk_qsort_tuple_partition_template.h"
 
 /*
- * Compare two tuples at specified depth
+ * Compare two tuples (index btree type) at specified depth
  *
  * If "abbreviated key" is disabled:
  *   get specified datums and compare them by ApplySortComparator().
@@ -392,7 +392,7 @@ mkqs_compare_datum_by_shortcut(SortTuple      *tuple1,
     if (ret != MKQS_COMPARE_NONNULL)
         return ret;
 #if SIZEOF_DATUM >= 8
-	if (compFuncType == MKQS_COMP_FUNC_SIGNED)
+	else if (compFuncType == MKQS_COMP_FUNC_SIGNED)
 	{
 		int64		datum1 = DatumGetInt64(tuple1->datum1);
 		int64		datum2 = DatumGetInt64(tuple2->datum1);
@@ -522,28 +522,27 @@ comparetup_mk_index_btree(SortTuple *a, SortTuple *b,
 							 int start_depth, int max_depth,
 							 Tuplesortstate *state)
 {
-	int			compare;
 
 	Assert(state->base.mkqsTupleType == MKQS_TUPLE_TYPE_INDEX_BTREE);
 	Assert(start_depth >= 0);
 	Assert(start_depth <= max_depth);
 	Assert(max_depth < state->base.nKeys);
 
-	if (start_depth != 0)
-		return comparetup_mk_index_btree_range(a, b, start_depth,
-											 max_depth, state);
+	if (start_depth == 0)
+	{
+		int compare = mkqs_compare_datum_by_shortcut(a, b, state);
+		if (compare != 0)
+			return compare;
 
-	compare = mkqs_compare_datum_by_shortcut(a, b, state);
-	if (compare != 0)
-		return compare;
+		if (state->base.sortKeys->abbrev_converter)
+			return comparetup_mk_index_btree_range(a, b, 0, max_depth, state);
 
-	if (state->base.sortKeys->abbrev_converter)
-		return comparetup_mk_index_btree_range(a, b, 0, max_depth, state);
+		if (max_depth == 0)
+			return 0;
 
-	if (max_depth == 0)
-		return 0;
-
-	return comparetup_mk_index_btree_range(a, b, 1, max_depth, state);
+		start_depth = 1;
+	}
+	return comparetup_mk_index_btree_range(a, b, start_depth, max_depth, state);
 }
 
 /* Compare an inclusive range of sort-key depths. */
@@ -582,7 +581,7 @@ mkqs_full_order_presorted(SortTuple *x, size_t n, Tuplesortstate *state)
 /*
  * Check only the current depth.  Equality is not sufficient to return from
  * mksort because later depths have not been checked; equal groups still need
- * to recurse to the next depth.
+ * to recurse to the next depth. So only strictly increasing is to be checked.
  */
 static bool
 mkqs_depth_strictly_increasing(SortTuple *x, size_t n, int depth,
@@ -617,12 +616,6 @@ get_median_from_three(int a,
 			 : (comparetup_mk(x + b, x + c, depth, depth, state) > 0 ?
 				b : (comparetup_mk(x + a, x + c, depth, depth, state) < 0 ? a : c));
 }
-
-static void mk_qsort_tuple(SortTuple *x,
-						   size_t n,
-						   int depth,
-						   Tuplesortstate *state,
-						   bool seenNull);
 
 /*
  * Major of multi-key quick sort
@@ -680,8 +673,12 @@ mk_qsort_tuple(SortTuple *x,
 			mkqs_full_order_presorted(x, n, state))
 			return;
 	}
-	else if (mkqs_depth_strictly_increasing(x, n, depth, state))
-		return;
+	else
+	{
+		/* For current depth, perform strictly increasing check */
+		if (mkqs_depth_strictly_increasing(x, n, depth, state))
+			return;
+	}
 
 	/*
 	 * When the count < MKQS_INSERTION_SORT_THRESHOLD and no need to handle
