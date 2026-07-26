@@ -67,25 +67,6 @@ mkqs_vec_swap(int a,
 }
 
 /*
- * Extract one or two datums at the given depth from btree index tuples.
- * When x2 is NULL, only the first datum is returned.
- */
-static pg_attribute_always_inline void
-mkqs_get_index_datums(const SortTuple *x1,
-					 const SortTuple *x2,
-					 int depth,
-					 Tuplesortstate *state,
-					 Datum *datum1,
-					 bool *isNull1,
-					 Datum *datum2,
-					 bool *isNull2)
-{
-	Assert(state->base.mkqsTupleType == MKQS_TUPLE_TYPE_INDEX_BTREE);
-	mkqs_get_datum_index_btree(x1, x2, depth, state,
-								 datum1, isNull1, datum2, isNull2);
-}
-
-/*
  * Check whether current datum (at specified tuple and depth) is null
  * Note that the input x means a specified tuple provided by caller but not
  * a tuple array, so tupleIndex is unnecessary.
@@ -116,8 +97,7 @@ check_datum_null(SortTuple *x,
 							 (TupleDesc) state->base.arg, &isNull);
 	}
 	else
-		mkqs_get_index_datums(x, NULL, depth, state,
-							 &datum, &isNull, NULL, NULL);
+		datum = mkqs_get_datum_index_btree(x, depth, state, &isNull);
 
 	return isNull;
 }
@@ -162,15 +142,13 @@ mkqs_get_heap_datum(SortTuple *tuple, SortSupport sortKey,
 
 /* Extract the current sort-key datum from one btree index tuple. */
 static pg_attribute_always_inline Datum
-mkqs_get_index_datum_by_sortkey(SortTuple *tuple, SortSupport sortKey,
-								Tuplesortstate *state, bool *isNull)
+mkqs_get_index_datum(SortTuple *tuple, SortSupport sortKey,
+					 Tuplesortstate *state, bool *isNull)
 {
 	int			depth = sortKey - state->base.sortKeys;
-	Datum		datum;
 
-	mkqs_get_index_datums(tuple, NULL, depth, state,
-						 &datum, isNull, NULL, NULL);
-	return datum;
+	Assert(state->base.mkqsTupleType == MKQS_TUPLE_TYPE_INDEX_BTREE);
+	return mkqs_get_datum_index_btree(tuple, depth, state, isNull);
 }
 
 #if SIZEOF_DATUM >= 8
@@ -201,14 +179,14 @@ mkqs_get_index_datum_by_sortkey(SortTuple *tuple, SortSupport sortKey,
 #define MKQS_PARTITION mkqs_partition_index_signed
 #define MKQS_COMPARE_TYPE int64
 #define MKQS_COMPARE_DATUM_GETTER DatumGetInt64
-#define MKQS_COMPARE_GET_DATUM mkqs_get_index_datum_by_sortkey
+#define MKQS_COMPARE_GET_DATUM mkqs_get_index_datum
 #include "mk_qsort_tuple_compare_template.h"
 
 #define MKQS_COMPARE mkqs_compare_index_unsigned
 #define MKQS_PARTITION mkqs_partition_index_unsigned
 #define MKQS_COMPARE_TYPE uint64
 #define MKQS_COMPARE_DATUM_GETTER DatumGetUInt64
-#define MKQS_COMPARE_GET_DATUM mkqs_get_index_datum_by_sortkey
+#define MKQS_COMPARE_GET_DATUM mkqs_get_index_datum
 #include "mk_qsort_tuple_compare_template.h"
 #endif
 
@@ -216,7 +194,7 @@ mkqs_get_index_datum_by_sortkey(SortTuple *tuple, SortSupport sortKey,
 #define MKQS_PARTITION mkqs_partition_index_int32
 #define MKQS_COMPARE_TYPE int32
 #define MKQS_COMPARE_DATUM_GETTER DatumGetInt32
-#define MKQS_COMPARE_GET_DATUM mkqs_get_index_datum_by_sortkey
+#define MKQS_COMPARE_GET_DATUM mkqs_get_index_datum
 #include "mk_qsort_tuple_compare_template.h"
 
 /* Compare a heap tuple with a previously extracted pivot datum. */
@@ -246,7 +224,7 @@ mkqs_compare_index_generic_to_pivot(SortTuple *tuple, Datum pivotDatum,
 	Datum		datum;
 	bool		isNull;
 
-	datum = mkqs_get_index_datum_by_sortkey(tuple, sortKey, state, &isNull);
+	datum = mkqs_get_index_datum(tuple, sortKey, state, &isNull);
 
 	return ApplySortComparator(datum, isNull,
 							   pivotDatum, pivotIsNull,
@@ -273,7 +251,7 @@ mkqs_compare_index_generic_to_pivot(SortTuple *tuple, Datum pivotDatum,
 #define MKQS_PARTITION_SETUP() \
 	do { \
 		sortKey = &state->base.sortKeys[depth]; \
-		pivotDatum = mkqs_get_index_datum_by_sortkey(pivot, sortKey, state, \
+		pivotDatum = mkqs_get_index_datum(pivot, sortKey, state, \
 												 &pivotIsNull); \
 	} while (0)
 #define MKQS_PARTITION_COMPARE(tuple) \
@@ -301,68 +279,6 @@ mkqs_compare_index_generic_to_pivot(SortTuple *tuple, Datum pivotDatum,
 	mkqs_compare_heap_generic_to_pivot((tuple), pivotDatum, pivotIsNull, \
 									   sortKey, state)
 #include "mk_qsort_tuple_partition_template.h"
-
-/*
- * Compare two tuples (index btree type) at specified depth
- *
- * If "abbreviated key" is disabled:
- *   get specified datums and compare them by ApplySortComparator().
- * If "abbreviated key" is enabled:
- *   Only first datum may be abbr key according to the design (see the comments
- *   of struct SortTuple), so different operations are needed for different
- *   datum.
- *   For first datum (depth == 0): get first datums ("abbr key" version) and
- *   compare them by ApplySortComparator(). If they are equal, get "full"
- *   version and compare again by ApplySortAbbrevFullComparator().
- *   For other datums: get specified datums and compare them by
- *   ApplySortComparator() as regular routine does.
- *
- * See comparetup_heap() for details.
- */
-static pg_attribute_always_inline int
-comparetup_mk_index_btree_single(SortTuple *tuple1,
-								 SortTuple *tuple2,
-								 int depth,
-								 Tuplesortstate *state)
-{
-	Datum		datum1,
-				datum2;
-	bool		isNull1,
-				isNull2;
-	SortSupport sortKey;
-	int			ret = 0;
-
-	Assert(state->base.mkqsTupleType == MKQS_TUPLE_TYPE_INDEX_BTREE);
-	Assert(depth < state->base.nKeys);
-
-	sortKey = state->base.sortKeys + depth;
-	mkqs_get_index_datums(tuple1, tuple2, depth, state,
-						 &datum1, &isNull1, &datum2, &isNull2);
-
-	/*
-	 * If "abbreviated key" is enabled, and we are in the first depth, it
-	 * means only "abbreviated keys" was compared. If the two datums were
-	 * determined to be equal by ApplySortComparator() in
-	 * comparetup_mk(), we need to perform an extra "full" comparing
-	 * by ApplySortAbbrevFullComparator().
-	 */
-	if (sortKey->abbrev_converter &&
-		depth == 0)
-	{
-		ret = ApplySortAbbrevFullComparator(datum1,
-											isNull1,
-											datum2,
-											isNull2,
-											sortKey);
-	}
-	else
-	{
-		ret = ApplySortComparator(datum1, isNull1,
-								  datum2, isNull2, sortKey);
-	}
-
-	return ret;
-}
 
 /* Compare an inclusive range of heap tuple sort-key depths. */
 static inline int
@@ -462,55 +378,84 @@ comparetup_mk_heap(SortTuple *a, SortTuple *b,
 }
 
 /* Compare an inclusive range of btree index tuple sort-key depths. */
-static int
-comparetup_mk_index_btree_range(SortTuple *a, SortTuple *b,
-							   int start_depth, int max_depth,
-							   Tuplesortstate *state)
+static inline int
+comparetup_mk_index_btree(SortTuple *a, SortTuple *b,
+						   int start_depth, int max_depth,
+						   Tuplesortstate *state)
 {
+	TuplesortPublic *base = &state->base;
 	int			depth = start_depth;
-	int			compare;
+	int32		compare;
+
+	Assert(base->mkqsTupleType == MKQS_TUPLE_TYPE_INDEX_BTREE);
+	Assert(start_depth >= 0);
+	Assert(start_depth <= max_depth);
+	Assert(max_depth < base->nKeys);
+
+	if (depth == 0)
+	{
+		SortSupport sortKey = &base->sortKeys[0];
+
+		compare = ApplySortComparator(a->datum1, a->isnull1,
+								  b->datum1, b->isnull1,
+								  sortKey);
+		if (compare != 0)
+			return compare;
+
+		if (!sortKey->abbrev_converter)
+		{
+			if (max_depth == 0)
+				return 0;
+			depth = 1;
+		}
+		else if (a->isnull1 || b->isnull1)
+		{
+			/* Both leading keys are NULL, so no full comparison is needed. */
+			Assert(a->isnull1 && b->isnull1);
+			if (max_depth == 0)
+				return 0;
+			depth = 1;
+		}
+	}
+
+	if (depth == 0)
+	{
+		SortSupport sortKey = &base->sortKeys[0];
+		Datum		datum1;
+		Datum		datum2;
+		bool		isnull1;
+		bool		isnull2;
+
+		datum1 = mkqs_get_index_datum(a, sortKey, state, &isnull1);
+		datum2 = mkqs_get_index_datum(b, sortKey, state, &isnull2);
+		Assert(!isnull1 && !isnull2);
+		compare = sortKey->abbrev_full_comparator(datum1, datum2, sortKey);
+		if (compare != 0 || max_depth == 0)
+		{
+			if (sortKey->ssup_reverse)
+				INVERT_COMPARE_RESULT(compare);
+			return compare;
+		}
+		depth = 1;
+	}
 
 	for (; depth <= max_depth; depth++)
 	{
-		compare = comparetup_mk_index_btree_single(a, b, depth, state);
+		SortSupport sortKey = &base->sortKeys[depth];
+		Datum		datum1;
+		Datum		datum2;
+		bool		isnull1;
+		bool		isnull2;
+
+		datum1 = mkqs_get_index_datum(a, sortKey, state, &isnull1);
+		datum2 = mkqs_get_index_datum(b, sortKey, state, &isnull2);
+		compare = ApplySortComparator(datum1, isnull1,
+								  datum2, isnull2, sortKey);
 		if (compare != 0)
 			return compare;
 	}
 
 	return 0;
-}
-
-/* Compare the leading key inline before entering the range comparator. */
-static pg_attribute_always_inline int
-comparetup_mk_index_btree(SortTuple *a, SortTuple *b,
-							 int start_depth, int max_depth,
-							 Tuplesortstate *state)
-{
-
-	Assert(state->base.mkqsTupleType == MKQS_TUPLE_TYPE_INDEX_BTREE);
-	Assert(start_depth >= 0);
-	Assert(start_depth <= max_depth);
-	Assert(max_depth < state->base.nKeys);
-
-	if (start_depth == 0)
-	{
-		SortSupport sortKey = &state->base.sortKeys[0];
-		int			compare;
-
-		compare = ApplySortComparator(a->datum1, a->isnull1,
-								  b->datum1, b->isnull1, sortKey);
-		if (compare != 0)
-			return compare;
-
-		if (state->base.sortKeys->abbrev_converter)
-			return comparetup_mk_index_btree_range(a, b, 0, max_depth, state);
-
-		if (max_depth == 0)
-			return 0;
-
-		start_depth = 1;
-	}
-	return comparetup_mk_index_btree_range(a, b, start_depth, max_depth, state);
 }
 
 /* Compare an inclusive range of sort-key depths. */

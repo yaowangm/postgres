@@ -2096,41 +2096,27 @@ readtup_datum(Tuplesortstate *state, SortTuple *stup,
 }
 
 /*
- * Get specified datums from SortTuple (IndexTuple for btree index) list.
- *
- * When x1 and x2 are provided by caller, two datums will be returned.
- * When x2 is NULL, only one datum will be returned.
+ * Get one datum from a SortTuple containing a btree IndexTuple.
  *
  * Note the function does not check the leading sort key in datum1/isnull1;
  * callers handle that separately.
  */
-void
-mkqs_get_datum_index_btree(const SortTuple *x1,
-						   const SortTuple *x2,
+Datum
+mkqs_get_datum_index_btree(const SortTuple *tuple,
 						   int depth,
 						   Tuplesortstate *state,
-						   Datum *datum1,
-						   bool *isNull1,
-						   Datum *datum2,
-						   bool *isNull2)
+						   bool *isNull)
 {
 	TupleDesc	tupDesc;
-	IndexTuple	indexTuple1;
 	TuplesortPublic *base = TuplesortstateGetPublic(state);
 	TuplesortIndexBTreeArg *arg = (TuplesortIndexBTreeArg *) base->arg;
 
-	Assert(x1);
+	Assert(tuple);
+	Assert(base->mkqsTupleType == MKQS_TUPLE_TYPE_INDEX_BTREE);
 
 	tupDesc = RelationGetDescr(arg->index.indexRel);
-	indexTuple1 = (IndexTuple) x1->tuple;
-	*datum1 = index_getattr(indexTuple1, depth + 1, tupDesc, isNull1);
-
-	if (x2 != NULL)
-	{
-		IndexTuple	indexTuple2 = (IndexTuple) x2->tuple;
-
-		*datum2 = index_getattr(indexTuple2, depth + 1, tupDesc, isNull2);
-	}
+	return index_getattr((IndexTuple) tuple->tuple, depth + 1,
+						 tupDesc, isNull);
 }
 
 /*

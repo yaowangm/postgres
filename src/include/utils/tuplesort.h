@@ -420,12 +420,10 @@ extern void *tuplesort_readtup_alloc(Tuplesortstate *state, Size tuplen);
 
 /* tuplesortvariants.c */
 
-extern void mkqs_get_datum_index_btree(const SortTuple *x1,
-										const SortTuple *x2,
-										int depth,
-										Tuplesortstate *state,
-										Datum *datum1, bool *isNull1,
-										Datum *datum2, bool *isNull2);
+extern Datum mkqs_get_datum_index_btree(const SortTuple *tuple,
+										 int depth,
+										 Tuplesortstate *state,
+										 bool *isNull);
 
 extern Tuplesortstate *tuplesort_begin_heap(TupleDesc tupDesc,
 											int nkeys, AttrNumber *attNums,
