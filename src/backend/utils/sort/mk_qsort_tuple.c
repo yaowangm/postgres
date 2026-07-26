@@ -152,6 +152,10 @@ mkqs_get_heap_datum(SortTuple *tuple, SortSupport sortKey,
 		MINIMAL_TUPLE_OFFSET;
 	heapTuple.t_data = (HeapTupleHeader) ((char *) tuple->tuple -
 		MINIMAL_TUPLE_OFFSET);
+	if (likely(sortKey->ssup_attno > 0))
+		return fastgetattr(&heapTuple, sortKey->ssup_attno,
+						   (TupleDesc) state->base.arg, isNull);
+
 	return heap_getattr(&heapTuple, sortKey->ssup_attno,
 						(TupleDesc) state->base.arg, isNull);
 }
