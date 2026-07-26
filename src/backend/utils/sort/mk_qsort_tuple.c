@@ -141,53 +141,6 @@ mkqs_compare_nulls(bool isNull1, bool isNull2, SortSupport sortKey)
 	return 1;
 }
 
-/* Apply a sort comparator, with fast paths for supported integer datums. */
-static inline int
-mkqs_apply_sort_comparator(Datum datum1,
-						   bool isNull1,
-						   Datum datum2,
-						   bool isNull2,
-						   SortSupport sortKey)
-{
-	int			ret;
-
-	ret = mkqs_compare_nulls(isNull1, isNull2, sortKey);
-	if (ret != MKQS_COMPARE_NONNULL)
-		return ret;
-
-#if SIZEOF_DATUM >= 8
-	if (sortKey->comparator == ssup_datum_signed_cmp)
-	{
-		int64		value1 = DatumGetInt64(datum1);
-		int64		value2 = DatumGetInt64(datum2);
-
-		ret = (value1 > value2) - (value1 < value2);
-	}
-	else if (sortKey->comparator == ssup_datum_unsigned_cmp)
-	{
-		uint64		value1 = DatumGetUInt64(datum1);
-		uint64		value2 = DatumGetUInt64(datum2);
-
-		ret = (value1 > value2) - (value1 < value2);
-	}
-	else
-#endif
-	if (sortKey->comparator == ssup_datum_int32_cmp)
-	{
-		int32		value1 = DatumGetInt32(datum1);
-		int32		value2 = DatumGetInt32(datum2);
-
-		ret = (value1 > value2) - (value1 < value2);
-	}
-	else
-		ret = sortKey->comparator(datum1, datum2, sortKey);
-
-	if (sortKey->ssup_reverse)
-		INVERT_COMPARE_RESULT(ret);
-
-	return ret;
-}
-
 /* Extract the current sort-key datum from one heap tuple. */
 static pg_attribute_always_inline Datum
 mkqs_get_heap_datum(SortTuple *tuple, SortSupport sortKey,
@@ -356,71 +309,9 @@ comparetup_mk_index_btree_single(SortTuple *tuple1,
 	}
 	else
 	{
-		ret = mkqs_apply_sort_comparator(datum1,
-									  isNull1,
-									  datum2,
-									  isNull2,
-									  sortKey);
-
+		ret = ApplySortComparator(datum1, isNull1,
+								  datum2, isNull2, sortKey);
 	}
-
-	return ret;
-}
-
-/*
- * Compare two tuples at first depth by some shortcuts
- *
- * The reason to use MkqsCompFuncType but not compare function pointers
- * directly is just for performance.
- */
-static pg_attribute_always_inline int
-mkqs_compare_datum_by_shortcut(SortTuple      *tuple1,
-							   SortTuple      *tuple2,
-							   Tuplesortstate *state)
-{
-	int			ret;
-	MkqsCompFuncType compFuncType = state->base.mkqsCompFuncType;
-	SortSupport sortKey = &state->base.sortKeys[0];
-
-	ret = mkqs_compare_nulls(tuple1->isnull1,
-                             tuple2->isnull1,
-                             sortKey);
-	if (ret != MKQS_COMPARE_NONNULL)
-		return ret;
-#if SIZEOF_DATUM >= 8
-	else if (compFuncType == MKQS_COMP_FUNC_SIGNED)
-	{
-		int64		datum1 = DatumGetInt64(tuple1->datum1);
-		int64		datum2 = DatumGetInt64(tuple2->datum1);
-
-		ret = (datum1 > datum2) - (datum1 < datum2);
-	}
-	else if (compFuncType == MKQS_COMP_FUNC_UNSIGNED)
-	{
-		uint64		datum1 = DatumGetUInt64(tuple1->datum1);
-		uint64		datum2 = DatumGetUInt64(tuple2->datum1);
-
-		ret = (datum1 > datum2) - (datum1 < datum2);
-	}
-#endif
-	else if (compFuncType == MKQS_COMP_FUNC_INT32)
-	{
-		int32		datum1 = DatumGetInt32(tuple1->datum1);
-		int32		datum2 = DatumGetInt32(tuple2->datum1);
-
-		ret = (datum1 > datum2) - (datum1 < datum2);
-	}
-	else
-	{
-		/* Small direct unsigned sorts retain the standard comparator path. */
-		Assert(compFuncType == MKQS_COMP_FUNC_GENERIC);
-		ret = sortKey->comparator(tuple1->datum1,
-								  tuple2->datum1,
-								  sortKey);
-	}
-
-	if (sortKey->ssup_reverse)
-		INVERT_COMPARE_RESULT(ret);
 
 	return ret;
 }
@@ -451,7 +342,8 @@ comparetup_mk_heap(SortTuple *a, SortTuple *b,
 		 * representation.  A nonzero abbreviated comparison is conclusive,
 		 * but zero does not establish that the full values are equal.
 		 */
-		compare = mkqs_compare_datum_by_shortcut(a, b, state);
+		compare = ApplySortComparator(a->datum1, a->isnull1,
+								  b->datum1, b->isnull1, sortKey);
 		if (compare != 0)
 			return compare;
 
@@ -512,8 +404,8 @@ comparetup_mk_heap(SortTuple *a, SortTuple *b,
 
 		datum1 = heap_getattr(&ltup, sortKey->ssup_attno, tupDesc, &isnull1);
 		datum2 = heap_getattr(&rtup, sortKey->ssup_attno, tupDesc, &isnull2);
-		compare = mkqs_apply_sort_comparator(datum1, isnull1,
-										 datum2, isnull2, sortKey);
+		compare = ApplySortComparator(datum1, isnull1,
+									  datum2, isnull2, sortKey);
 		if (compare != 0)
 			return compare;
 	}
@@ -554,7 +446,11 @@ comparetup_mk_index_btree(SortTuple *a, SortTuple *b,
 
 	if (start_depth == 0)
 	{
-		int compare = mkqs_compare_datum_by_shortcut(a, b, state);
+		SortSupport sortKey = &state->base.sortKeys[0];
+		int			compare;
+
+		compare = ApplySortComparator(a->datum1, a->isnull1,
+								  b->datum1, b->isnull1, sortKey);
 		if (compare != 0)
 			return compare;
 
