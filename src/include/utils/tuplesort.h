@@ -67,14 +67,6 @@ typedef struct SortCoordinateData *SortCoordinate;
 
 typedef enum
 {
-	MKQS_COMP_FUNC_GENERIC,
-	MKQS_COMP_FUNC_UNSIGNED,
-	MKQS_COMP_FUNC_SIGNED,
-	MKQS_COMP_FUNC_INT32
-} MkqsCompFuncType;
-
-typedef enum
-{
 	MKQS_TUPLE_TYPE_UNSUPPORTED,
 	MKQS_TUPLE_TYPE_HEAP,
 	MKQS_TUPLE_TYPE_INDEX_BTREE
@@ -254,8 +246,6 @@ typedef struct
 	 * the function pointer is filled for only btree index tuple.
 	 */
 	MkqsHandleDupFunc mkqsHandleDupFunc;
-
-	MkqsCompFuncType mkqsCompFuncType;
 } TuplesortPublic;
 
 /* Sort parallel code from state for sort__start probes */

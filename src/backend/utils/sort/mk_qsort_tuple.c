@@ -20,8 +20,6 @@
  * replacement of qsort_tuple() when specific conditions are satisfied.
  */
 
-#define MKQS_COMPARE_NONNULL 2
-
 /* Boundaries of the equal, lesser, unprocessed, and greater partitions. */
 typedef struct MkqsPartitionBounds
 {
@@ -100,25 +98,6 @@ check_datum_null(SortTuple *x,
 		datum = mkqs_get_datum_index_btree(x, depth, state, &isNull);
 
 	return isNull;
-}
-
-/*
- * Compare NULL states according to sortKey.  Return MKQS_COMPARE_NONNULL when
- * both datums must be compared.
- */
-static pg_attribute_always_inline int
-mkqs_compare_nulls(bool isNull1, bool isNull2, SortSupport sortKey)
-{
-	if (!isNull1 && !isNull2)
-		return MKQS_COMPARE_NONNULL;
-
-	if (isNull1 && isNull2)
-		return 0;
-
-	if (isNull1 == sortKey->ssup_nulls_first)
-		return -1;
-
-	return 1;
 }
 
 /* Extract the current sort-key datum from one heap tuple. */

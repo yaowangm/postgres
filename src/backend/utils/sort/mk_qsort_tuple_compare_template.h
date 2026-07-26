@@ -38,17 +38,23 @@ MKQS_COMPARE(SortTuple *tuple, Datum pivotDatum, bool pivotIsNull,
 	int			compare;
 
 	datum = MKQS_COMPARE_GET_DATUM(tuple, sortKey, state, &isNull);
-	compare = mkqs_compare_nulls(isNull, pivotIsNull, sortKey);
-	if (compare == MKQS_COMPARE_NONNULL)
+	if (isNull || pivotIsNull)
+	{
+		if (isNull && pivotIsNull)
+			return 0;
+
+		return isNull == sortKey->ssup_nulls_first ? -1 : 1;
+	}
+
 	{
 		MKQS_COMPARE_TYPE value = MKQS_COMPARE_DATUM_GETTER(datum);
 		MKQS_COMPARE_TYPE pivotValue =
 			MKQS_COMPARE_DATUM_GETTER(pivotDatum);
 
 		compare = (value > pivotValue) - (value < pivotValue);
-		if (sortKey->ssup_reverse)
-			INVERT_COMPARE_RESULT(compare);
 	}
+	if (sortKey->ssup_reverse)
+		INVERT_COMPARE_RESULT(compare);
 
 	return compare;
 }

@@ -3069,41 +3069,35 @@ tuplesort_sort_memtuples(Tuplesortstate *state)
 			state->base.nKeys > 1 &&
 			state->base.mkqsTupleType != MKQS_TUPLE_TYPE_UNSUPPORTED)
 		{
-			/*
-			 * Set relevant Datum Sort Comparator according to concrete data type
-			 * of the first sort key
-			 */
-			if (state->base.haveDatum1)
+			bool		use_radix = false;
+
+			/* Check whether radix sort supports the leading key. */
+			if (state->base.haveDatum1 &&
+				state->base.sortKeys[0].abbrev_converter == NULL)
 			{
-				if (state->base.sortKeys[0].abbrev_converter != NULL)
-					state->base.mkqsCompFuncType = MKQS_COMP_FUNC_GENERIC;
+				SortSupport sortKey = &state->base.sortKeys[0];
+
+				if (sortKey->comparator == ssup_datum_int32_cmp)
+					use_radix = true;
 #if SIZEOF_DATUM >= 8
-				else if (state->base.sortKeys[0].comparator ==
-						 ssup_datum_unsigned_cmp)
-					state->base.mkqsCompFuncType = MKQS_COMP_FUNC_UNSIGNED;
-				else if (state->base.sortKeys[0].comparator == ssup_datum_signed_cmp)
-					state->base.mkqsCompFuncType = MKQS_COMP_FUNC_SIGNED;
+				else if (sortKey->comparator == ssup_datum_unsigned_cmp ||
+						 sortKey->comparator == ssup_datum_signed_cmp)
+					use_radix = true;
 #endif
-				else if (state->base.sortKeys[0].comparator == ssup_datum_int32_cmp)
-					state->base.mkqsCompFuncType = MKQS_COMP_FUNC_INT32;
-				else
-					state->base.mkqsCompFuncType = MKQS_COMP_FUNC_GENERIC;
 			}
 
 			/*
 			 * Match qsort_tuple()'s full-key presorted check before entering
 			 * the generic mksort path.
 			 */
-			if (state->base.mkqsCompFuncType == MKQS_COMP_FUNC_GENERIC)
+			if (!use_radix)
 			{
 				if (mkqs_full_order_presorted(state->memtuples,
 									  state->memtupcount, state))
 					return;
 				state->mkqsTopPresortFailed = true;
 			}
-			if (state->memtupcount >= QSORT_THRESHOLD &&
-				state->base.mkqsCompFuncType != MKQS_COMP_FUNC_GENERIC &&
-				state->base.sortKeys[0].abbrev_converter == NULL)
+			if (state->memtupcount >= QSORT_THRESHOLD && use_radix)
 			{
 				radix_sort_tuple(state->memtuples,
 							 state->memtupcount,
