@@ -461,10 +461,10 @@ comparetup_mk_heap(SortTuple *a, SortTuple *b,
 				return 0;
 			depth = 1;
 		}
-		else if (a->isnull1)
+		else if (a->isnull1 || b->isnull1)
 		{
 			/* Both leading keys are NULL, so no full comparison is needed. */
-			Assert(b->isnull1);
+			Assert(a->isnull1 && b->isnull1);
 			if (max_depth == 0)
 				return 0;
 			depth = 1;
@@ -493,10 +493,12 @@ comparetup_mk_heap(SortTuple *a, SortTuple *b,
 		datum2 = heap_getattr(&rtup, sortKey->ssup_attno, tupDesc, &isnull2);
 		Assert(!isnull1 && !isnull2);
 		compare = sortKey->abbrev_full_comparator(datum1, datum2, sortKey);
-		if (sortKey->ssup_reverse)
-			INVERT_COMPARE_RESULT(compare);
 		if (compare != 0 || max_depth == 0)
+		{
+			if (sortKey->ssup_reverse)
+				INVERT_COMPARE_RESULT(compare);
 			return compare;
+		}
 		depth = 1;
 	}
 
