@@ -156,21 +156,63 @@ mkqs_get_heap_datum(SortTuple *tuple, SortSupport sortKey,
 						(TupleDesc) state->base.arg, isNull);
 }
 
+/* Extract the current sort-key datum from one btree index tuple. */
+static pg_attribute_always_inline Datum
+mkqs_get_index_datum_by_sortkey(SortTuple *tuple, SortSupport sortKey,
+								Tuplesortstate *state, bool *isNull)
+{
+	int			depth = sortKey - state->base.sortKeys;
+	Datum		datum;
+
+	mkqs_get_index_datums(tuple, NULL, depth, state,
+						 &datum, isNull, NULL, NULL);
+	return datum;
+}
+
 #if SIZEOF_DATUM >= 8
 #define MKQS_COMPARE mkqs_compare_heap_signed
+#define MKQS_PARTITION mkqs_partition_heap_signed
 #define MKQS_COMPARE_TYPE int64
 #define MKQS_COMPARE_DATUM_GETTER DatumGetInt64
+#define MKQS_COMPARE_GET_DATUM mkqs_get_heap_datum
 #include "mk_qsort_tuple_compare_template.h"
 
 #define MKQS_COMPARE mkqs_compare_heap_unsigned
+#define MKQS_PARTITION mkqs_partition_heap_unsigned
 #define MKQS_COMPARE_TYPE uint64
 #define MKQS_COMPARE_DATUM_GETTER DatumGetUInt64
+#define MKQS_COMPARE_GET_DATUM mkqs_get_heap_datum
 #include "mk_qsort_tuple_compare_template.h"
 #endif
 
 #define MKQS_COMPARE mkqs_compare_heap_int32
+#define MKQS_PARTITION mkqs_partition_heap_int32
 #define MKQS_COMPARE_TYPE int32
 #define MKQS_COMPARE_DATUM_GETTER DatumGetInt32
+#define MKQS_COMPARE_GET_DATUM mkqs_get_heap_datum
+#include "mk_qsort_tuple_compare_template.h"
+
+#if SIZEOF_DATUM >= 8
+#define MKQS_COMPARE mkqs_compare_index_signed
+#define MKQS_PARTITION mkqs_partition_index_signed
+#define MKQS_COMPARE_TYPE int64
+#define MKQS_COMPARE_DATUM_GETTER DatumGetInt64
+#define MKQS_COMPARE_GET_DATUM mkqs_get_index_datum_by_sortkey
+#include "mk_qsort_tuple_compare_template.h"
+
+#define MKQS_COMPARE mkqs_compare_index_unsigned
+#define MKQS_PARTITION mkqs_partition_index_unsigned
+#define MKQS_COMPARE_TYPE uint64
+#define MKQS_COMPARE_DATUM_GETTER DatumGetUInt64
+#define MKQS_COMPARE_GET_DATUM mkqs_get_index_datum_by_sortkey
+#include "mk_qsort_tuple_compare_template.h"
+#endif
+
+#define MKQS_COMPARE mkqs_compare_index_int32
+#define MKQS_PARTITION mkqs_partition_index_int32
+#define MKQS_COMPARE_TYPE int32
+#define MKQS_COMPARE_DATUM_GETTER DatumGetInt32
+#define MKQS_COMPARE_GET_DATUM mkqs_get_index_datum_by_sortkey
 #include "mk_qsort_tuple_compare_template.h"
 
 /* Compare a heap tuple with a previously extracted pivot datum. */
@@ -190,6 +232,23 @@ mkqs_compare_heap_generic_to_pivot(SortTuple *tuple, Datum pivotDatum,
 							   sortKey);
 }
 
+/* Compare a btree index tuple with a previously extracted pivot datum. */
+static pg_attribute_always_inline int
+mkqs_compare_index_generic_to_pivot(SortTuple *tuple, Datum pivotDatum,
+									bool pivotIsNull,
+									SortSupport sortKey,
+									Tuplesortstate *state)
+{
+	Datum		datum;
+	bool		isNull;
+
+	datum = mkqs_get_index_datum_by_sortkey(tuple, sortKey, state, &isNull);
+
+	return ApplySortComparator(datum, isNull,
+							   pivotDatum, pivotIsNull,
+							   sortKey);
+}
+
 /*
  * Keep the generic comparator in the caller's code path.  Unlike the typed
  * cases, it does not benefit from dispatching to a specialized partition.
@@ -198,6 +257,24 @@ mkqs_compare_heap_generic_to_pivot(SortTuple *tuple, Datum pivotDatum,
 #define MKQS_PARTITION_SCOPE static pg_attribute_always_inline
 #define MKQS_PARTITION_COMPARE(tuple) \
 	comparetup_mk((tuple), pivot, depth, depth, state)
+#include "mk_qsort_tuple_partition_template.h"
+
+/* Cache the pivot datum for generic btree index partitions. */
+#define MKQS_PARTITION mkqs_partition_index_generic
+#define MKQS_PARTITION_SCOPE static pg_attribute_always_inline
+#define MKQS_PARTITION_EXTRA_DECLARATIONS \
+	SortSupport sortKey; \
+	Datum		pivotDatum; \
+	bool		pivotIsNull;
+#define MKQS_PARTITION_SETUP() \
+	do { \
+		sortKey = &state->base.sortKeys[depth]; \
+		pivotDatum = mkqs_get_index_datum_by_sortkey(pivot, sortKey, state, \
+												 &pivotIsNull); \
+	} while (0)
+#define MKQS_PARTITION_COMPARE(tuple) \
+	mkqs_compare_index_generic_to_pivot((tuple), pivotDatum, pivotIsNull, \
+										sortKey, state)
 #include "mk_qsort_tuple_partition_template.h"
 
 /*
@@ -219,39 +296,6 @@ mkqs_compare_heap_generic_to_pivot(SortTuple *tuple, Datum pivotDatum,
 #define MKQS_PARTITION_COMPARE(tuple) \
 	mkqs_compare_heap_generic_to_pivot((tuple), pivotDatum, pivotIsNull, \
 									   sortKey, state)
-#include "mk_qsort_tuple_partition_template.h"
-
-/*
- * Generate heap partition functions whose integer comparator is fixed before
- * entering the hot loop.
- */
-#if SIZEOF_DATUM >= 8
-#define MKQS_PARTITION mkqs_partition_heap_signed
-#define MKQS_PARTITION_SCOPE static pg_noinline
-#define MKQS_PARTITION_EXTRA_DECLARATIONS SortSupport sortKey;
-#define MKQS_PARTITION_SETUP() \
-	(sortKey = &state->base.sortKeys[depth])
-#define MKQS_PARTITION_COMPARE(tuple) \
-	mkqs_compare_heap_signed((tuple), pivot, sortKey, state)
-#include "mk_qsort_tuple_partition_template.h"
-
-#define MKQS_PARTITION mkqs_partition_heap_unsigned
-#define MKQS_PARTITION_SCOPE static pg_noinline
-#define MKQS_PARTITION_EXTRA_DECLARATIONS SortSupport sortKey;
-#define MKQS_PARTITION_SETUP() \
-	(sortKey = &state->base.sortKeys[depth])
-#define MKQS_PARTITION_COMPARE(tuple) \
-	mkqs_compare_heap_unsigned((tuple), pivot, sortKey, state)
-#include "mk_qsort_tuple_partition_template.h"
-#endif
-
-#define MKQS_PARTITION mkqs_partition_heap_int32
-#define MKQS_PARTITION_SCOPE static pg_noinline
-#define MKQS_PARTITION_EXTRA_DECLARATIONS SortSupport sortKey;
-#define MKQS_PARTITION_SETUP() \
-	(sortKey = &state->base.sortKeys[depth])
-#define MKQS_PARTITION_COMPARE(tuple) \
-	mkqs_compare_heap_int32((tuple), pivot, sortKey, state)
 #include "mk_qsort_tuple_partition_template.h"
 
 /*
@@ -639,9 +683,9 @@ mk_qsort_tuple(SortTuple *x,
 	lessStart = get_median_from_three(l, m, r, x, depth, state);
 	mkqs_swap(0, lessStart, x);
 
-	if (state->base.mkqsTupleType != MKQS_TUPLE_TYPE_HEAP || depth == 0)
+	if (depth == 0)
 		mkqs_partition_generic(x, n, depth, state, &bounds);
-	else
+	else if (state->base.mkqsTupleType == MKQS_TUPLE_TYPE_HEAP)
 	{
 		SortSupport sortKey = &state->base.sortKeys[depth];
 
@@ -656,6 +700,22 @@ mk_qsort_tuple(SortTuple *x,
 			mkqs_partition_heap_int32(x, n, depth, state, &bounds);
 		else
 			mkqs_partition_heap_generic(x, n, depth, state, &bounds);
+	}
+	else
+	{
+		SortSupport sortKey = &state->base.sortKeys[depth];
+
+#if SIZEOF_DATUM >= 8
+		if (sortKey->comparator == ssup_datum_signed_cmp)
+			mkqs_partition_index_signed(x, n, depth, state, &bounds);
+		else if (sortKey->comparator == ssup_datum_unsigned_cmp)
+			mkqs_partition_index_unsigned(x, n, depth, state, &bounds);
+		else
+#endif
+		if (sortKey->comparator == ssup_datum_int32_cmp)
+			mkqs_partition_index_int32(x, n, depth, state, &bounds);
+		else
+			mkqs_partition_index_generic(x, n, depth, state, &bounds);
 	}
 
 	lessStart = bounds.lessStart;

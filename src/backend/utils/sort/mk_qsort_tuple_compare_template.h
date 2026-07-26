@@ -1,7 +1,7 @@
 /*-------------------------------------------------------------------------
  *
  * mk_qsort_tuple_compare_template.h
- *	  Template for a heap tuple comparator used by multi-key quicksort.
+ *	  Template for a typed comparator and partition used by multi-key quicksort.
  *
  * Copyright (c) 2026, PostgreSQL Global Development Group
  *
@@ -11,8 +11,10 @@
  *	  included:
  *
  *	  - MKQS_COMPARE - name of the comparator function to generate
+ *	  - MKQS_PARTITION - name of the partition function to generate
  *	  - MKQS_COMPARE_TYPE - C type used for comparison
  *	  - MKQS_COMPARE_DATUM_GETTER - convert Datum to MKQS_COMPARE_TYPE
+ *	  - MKQS_COMPARE_GET_DATUM - extract a datum from the input tuple
  *
  * IDENTIFICATION
  *	  src/backend/utils/sort/mk_qsort_tuple_compare_template.h
@@ -20,30 +22,30 @@
  *-------------------------------------------------------------------------
  */
 
-#if !defined(MKQS_COMPARE) || !defined(MKQS_COMPARE_TYPE) || \
-	!defined(MKQS_COMPARE_DATUM_GETTER)
+#if !defined(MKQS_COMPARE) || !defined(MKQS_PARTITION) || \
+	!defined(MKQS_COMPARE_TYPE) || \
+	!defined(MKQS_COMPARE_DATUM_GETTER) || \
+	!defined(MKQS_COMPARE_GET_DATUM)
 #error "MKQS comparator template parameters must be defined"
 #endif
 
 static pg_attribute_always_inline int
-MKQS_COMPARE(SortTuple *tuple1, SortTuple *tuple2,
+MKQS_COMPARE(SortTuple *tuple, Datum pivotDatum, bool pivotIsNull,
 			 SortSupport sortKey, Tuplesortstate *state)
 {
-	Datum		datum1;
-	Datum		datum2;
-	bool		isNull1;
-	bool		isNull2;
+	Datum		datum;
+	bool		isNull;
 	int			compare;
 
-	datum1 = mkqs_get_heap_datum(tuple1, sortKey, state, &isNull1);
-	datum2 = mkqs_get_heap_datum(tuple2, sortKey, state, &isNull2);
-	compare = mkqs_compare_nulls(isNull1, isNull2, sortKey);
+	datum = MKQS_COMPARE_GET_DATUM(tuple, sortKey, state, &isNull);
+	compare = mkqs_compare_nulls(isNull, pivotIsNull, sortKey);
 	if (compare == MKQS_COMPARE_NONNULL)
 	{
-		MKQS_COMPARE_TYPE value1 = MKQS_COMPARE_DATUM_GETTER(datum1);
-		MKQS_COMPARE_TYPE value2 = MKQS_COMPARE_DATUM_GETTER(datum2);
+		MKQS_COMPARE_TYPE value = MKQS_COMPARE_DATUM_GETTER(datum);
+		MKQS_COMPARE_TYPE pivotValue =
+			MKQS_COMPARE_DATUM_GETTER(pivotDatum);
 
-		compare = (value1 > value2) - (value1 < value2);
+		compare = (value > pivotValue) - (value < pivotValue);
 		if (sortKey->ssup_reverse)
 			INVERT_COMPARE_RESULT(compare);
 	}
@@ -51,6 +53,23 @@ MKQS_COMPARE(SortTuple *tuple1, SortTuple *tuple2,
 	return compare;
 }
 
+/* Cache the pivot datum once and keep the typed comparison in the hot loop. */
+#define MKQS_PARTITION_SCOPE static pg_noinline
+#define MKQS_PARTITION_EXTRA_DECLARATIONS \
+	SortSupport sortKey; \
+	Datum		pivotDatum; \
+	bool		pivotIsNull;
+#define MKQS_PARTITION_SETUP() \
+	do { \
+		sortKey = &state->base.sortKeys[depth]; \
+		pivotDatum = MKQS_COMPARE_GET_DATUM(pivot, sortKey, state, \
+										 &pivotIsNull); \
+	} while (0)
+#define MKQS_PARTITION_COMPARE(tuple) \
+	MKQS_COMPARE((tuple), pivotDatum, pivotIsNull, sortKey, state)
+#include "mk_qsort_tuple_partition_template.h"
+
 #undef MKQS_COMPARE
 #undef MKQS_COMPARE_DATUM_GETTER
+#undef MKQS_COMPARE_GET_DATUM
 #undef MKQS_COMPARE_TYPE
