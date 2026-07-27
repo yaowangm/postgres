@@ -64,7 +64,18 @@ mkqs_vec_swap(int a,
 	}
 }
 
-/* Extract the current sort-key datum from one heap tuple. */
+/* Extract a sort-key datum from an already constructed heap tuple. */
+static pg_attribute_always_inline Datum
+mkqs_get_heap_tuple_datum(HeapTuple tuple, SortSupport sortKey,
+						  TupleDesc tupDesc, bool *isNull)
+{
+	if (likely(sortKey->ssup_attno > 0))
+		return fastgetattr(tuple, sortKey->ssup_attno, tupDesc, isNull);
+
+	return heap_getattr(tuple, sortKey->ssup_attno, tupDesc, isNull);
+}
+
+/* Extract the current sort-key datum from one heap SortTuple. */
 static pg_attribute_always_inline Datum
 mkqs_get_heap_datum(SortTuple *tuple, SortSupport sortKey,
 					Tuplesortstate *state, bool *isNull)
@@ -75,12 +86,8 @@ mkqs_get_heap_datum(SortTuple *tuple, SortSupport sortKey,
 		MINIMAL_TUPLE_OFFSET;
 	heapTuple.t_data = (HeapTupleHeader) ((char *) tuple->tuple -
 		MINIMAL_TUPLE_OFFSET);
-	if (likely(sortKey->ssup_attno > 0))
-		return fastgetattr(&heapTuple, sortKey->ssup_attno,
-						   (TupleDesc) state->base.arg, isNull);
-
-	return heap_getattr(&heapTuple, sortKey->ssup_attno,
-						(TupleDesc) state->base.arg, isNull);
+	return mkqs_get_heap_tuple_datum(&heapTuple, sortKey,
+					 (TupleDesc) state->base.arg, isNull);
 }
 
 /*
@@ -93,7 +100,6 @@ check_datum_null(SortTuple *x,
 				 int depth,
 				 Tuplesortstate *state)
 {
-	Datum		datum;
 	bool		isNull;
 
 	Assert(depth < state->base.nKeys);
@@ -104,10 +110,10 @@ check_datum_null(SortTuple *x,
 	if (state->base.mkqsTupleType == MKQS_TUPLE_TYPE_HEAP)
 	{
 		SortSupport sortKey = &state->base.sortKeys[depth];
-		datum = mkqs_get_heap_datum(x, sortKey, state, &isNull);
+		(void) mkqs_get_heap_datum(x, sortKey, state, &isNull);
 	}
 	else
-		datum = mkqs_get_datum_index_btree(x, depth, state, &isNull);
+		(void) mkqs_get_datum_index_btree(x, depth, state, &isNull);
 
 	return isNull;
 }
@@ -317,8 +323,8 @@ comparetup_mk_heap(SortTuple *a, SortTuple *b,
 		 * necessarily non-NULL values.  Calling the comparator directly
 		 * avoids repeating the NULL checks performed above.
 		 */
-		datum1 = heap_getattr(&ltup, sortKey->ssup_attno, tupDesc, &isnull1);
-		datum2 = heap_getattr(&rtup, sortKey->ssup_attno, tupDesc, &isnull2);
+		datum1 = mkqs_get_heap_tuple_datum(&ltup, sortKey, tupDesc, &isnull1);
+		datum2 = mkqs_get_heap_tuple_datum(&rtup, sortKey, tupDesc, &isnull2);
 		Assert(!isnull1 && !isnull2);
 		compare = sortKey->abbrev_full_comparator(datum1, datum2, sortKey);
 		if (compare != 0 || max_depth == 0)
@@ -338,8 +344,8 @@ comparetup_mk_heap(SortTuple *a, SortTuple *b,
 		bool		isnull1;
 		bool		isnull2;
 
-		datum1 = heap_getattr(&ltup, sortKey->ssup_attno, tupDesc, &isnull1);
-		datum2 = heap_getattr(&rtup, sortKey->ssup_attno, tupDesc, &isnull2);
+		datum1 = mkqs_get_heap_tuple_datum(&ltup, sortKey, tupDesc, &isnull1);
+		datum2 = mkqs_get_heap_tuple_datum(&rtup, sortKey, tupDesc, &isnull2);
 		compare = ApplySortComparator(datum1, isnull1,
 									  datum2, isnull2, sortKey);
 		if (compare != 0)
