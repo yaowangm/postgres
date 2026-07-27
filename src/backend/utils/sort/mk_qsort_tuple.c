@@ -64,6 +64,25 @@ mkqs_vec_swap(int a,
 	}
 }
 
+/* Extract the current sort-key datum from one heap tuple. */
+static pg_attribute_always_inline Datum
+mkqs_get_heap_datum(SortTuple *tuple, SortSupport sortKey,
+					Tuplesortstate *state, bool *isNull)
+{
+	HeapTupleData heapTuple;
+
+	heapTuple.t_len = ((MinimalTuple) tuple->tuple)->t_len +
+		MINIMAL_TUPLE_OFFSET;
+	heapTuple.t_data = (HeapTupleHeader) ((char *) tuple->tuple -
+		MINIMAL_TUPLE_OFFSET);
+	if (likely(sortKey->ssup_attno > 0))
+		return fastgetattr(&heapTuple, sortKey->ssup_attno,
+						   (TupleDesc) state->base.arg, isNull);
+
+	return heap_getattr(&heapTuple, sortKey->ssup_attno,
+						(TupleDesc) state->base.arg, isNull);
+}
+
 /*
  * Check whether current datum (at specified tuple and depth) is null
  * Note that the input x means a specified tuple provided by caller but not
@@ -84,39 +103,13 @@ check_datum_null(SortTuple *x,
 
 	if (state->base.mkqsTupleType == MKQS_TUPLE_TYPE_HEAP)
 	{
-		HeapTupleData heapTuple;
 		SortSupport sortKey = &state->base.sortKeys[depth];
-
-		heapTuple.t_len = ((MinimalTuple) x->tuple)->t_len +
-			MINIMAL_TUPLE_OFFSET;
-		heapTuple.t_data = (HeapTupleHeader) ((char *) x->tuple -
-			MINIMAL_TUPLE_OFFSET);
-		datum = heap_getattr(&heapTuple, sortKey->ssup_attno,
-							 (TupleDesc) state->base.arg, &isNull);
+		datum = mkqs_get_heap_datum(x, sortKey, state, &isNull);
 	}
 	else
 		datum = mkqs_get_datum_index_btree(x, depth, state, &isNull);
 
 	return isNull;
-}
-
-/* Extract the current sort-key datum from one heap tuple. */
-static pg_attribute_always_inline Datum
-mkqs_get_heap_datum(SortTuple *tuple, SortSupport sortKey,
-					Tuplesortstate *state, bool *isNull)
-{
-	HeapTupleData heapTuple;
-
-	heapTuple.t_len = ((MinimalTuple) tuple->tuple)->t_len +
-		MINIMAL_TUPLE_OFFSET;
-	heapTuple.t_data = (HeapTupleHeader) ((char *) tuple->tuple -
-		MINIMAL_TUPLE_OFFSET);
-	if (likely(sortKey->ssup_attno > 0))
-		return fastgetattr(&heapTuple, sortKey->ssup_attno,
-						   (TupleDesc) state->base.arg, isNull);
-
-	return heap_getattr(&heapTuple, sortKey->ssup_attno,
-						(TupleDesc) state->base.arg, isNull);
 }
 
 /* Extract the current sort-key datum from one btree index tuple. */
