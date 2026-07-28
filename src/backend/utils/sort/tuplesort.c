@@ -2677,7 +2677,8 @@ normalize_datum(Datum orig, SortSupport ssup)
  */
 static void
 radix_sort_recursive(SortTuple *begin, size_t n_elems, int level,
-					 Tuplesortstate *state, bool use_mksort_tiebreak)
+					 Tuplesortstate *state, bool use_mksort_tiebreak,
+					 MkqsContext *mkqsContext)
 {
 	RadixSortInfo partitions[256] = {0};
 	uint8		remaining_partitions[256];
@@ -2690,6 +2691,8 @@ radix_sort_recursive(SortTuple *begin, size_t n_elems, int level,
 	size_t		start_offset = 0;
 	SortTuple  *partition_begin = begin;
 	int			next_level;
+
+	Assert(!use_mksort_tiebreak || mkqsContext != NULL);
 
 	/* count number of occurrences of each byte */
 	ref_datum = normalize_datum(begin[0].datum1, ssup);
@@ -2832,10 +2835,11 @@ radix_sort_recursive(SortTuple *begin, size_t n_elems, int level,
 				else
 				{
 					radix_sort_recursive(partition_begin,
-									 num_elements,
-									 next_level,
-									 state,
-									 use_mksort_tiebreak);
+										 num_elements,
+										 next_level,
+										 state,
+										 use_mksort_tiebreak,
+										 mkqsContext);
 				}
 			}
 			else if (state->base.onlyKey == NULL)
@@ -2849,10 +2853,11 @@ radix_sort_recursive(SortTuple *begin, size_t n_elems, int level,
 					num_elements >= MKQS_RADIX_TIEBREAK_THRESHOLD)
 				{
 					mk_qsort_tuple(partition_begin,
-								num_elements,
-								1,
-								state,
-								false);
+								   num_elements,
+								   1,
+								   state,
+								   false,
+								   mkqsContext);
 				}
 				else
 					qsort_tuple(partition_begin,
@@ -2875,7 +2880,7 @@ radix_sort_recursive(SortTuple *begin, size_t n_elems, int level,
  */
 static void
 radix_sort_tuple(SortTuple *data, size_t n, Tuplesortstate *state,
-				 bool use_mksort_tiebreak)
+				 bool use_mksort_tiebreak, MkqsContext *mkqsContext)
 {
 	bool		nulls_first = state->base.sortKeys[0].ssup_nulls_first;
 	SortTuple  *null_start;
@@ -2884,6 +2889,8 @@ radix_sort_tuple(SortTuple *data, size_t n, Tuplesortstate *state,
 				d2,
 				null_count,
 				not_null_count;
+
+	Assert(!use_mksort_tiebreak || mkqsContext != NULL);
 
 	/*
 	 * Find the first NOT NULL if NULLS FIRST, or first NULL if NULLS LAST.
@@ -2969,10 +2976,11 @@ radix_sort_tuple(SortTuple *data, size_t n, Tuplesortstate *state,
 		if (use_mksort_tiebreak)
 		{
 			mk_qsort_tuple(null_start,
-					   null_count,
-					   1,
-					   state,
-					   true);
+						   null_count,
+						   1,
+						   state,
+						   true,
+						   mkqsContext);
 		}
 		else
 			qsort_tuple(null_start,
@@ -3014,10 +3022,11 @@ radix_sort_tuple(SortTuple *data, size_t n, Tuplesortstate *state,
 		else
 		{
 			radix_sort_recursive(not_null_start,
-							 not_null_count,
-							 0,
-							 state,
-							 use_mksort_tiebreak);
+								 not_null_count,
+								 0,
+								 state,
+								 use_mksort_tiebreak,
+								 mkqsContext);
 		}
 	}
 }
@@ -3048,27 +3057,24 @@ tuplesort_sort_memtuples(Tuplesortstate *state)
 	if (state->memtupcount > 1)
 	{
 		/*
-		 * Apply multi-key quick sort when:
-		 *  1. enable_mk_sort is set
-		 *  2. There are multiple keys available
-		 *  3. mkqsTupleType identifies a tuple type supported by mk qsort.
-		 *     Currently heap tuples and non-unique btree index tuples are
-		 *     supported.
+		 * Apply multi-key quick sort when: 1. enable_mk_sort is set 2. There
+		 * are multiple keys available 3. mkqsTupleType identifies a tuple
+		 * type supported by mk qsort. Currently heap tuples and non-unique
+		 * btree index tuples are supported.
 		 *
 		 * A summary of tuple types supported by mk qsort:
 		 *
-		 *  HeapTuple: supported
-		 *  IndexTuple(btree): supported for non-unique builds
-		 *  IndexTuple(hash): not supported because there is only one key
-		 *  DatumTuple: not supported because there is only one key
-		 *  HeapTuple(for cluster): not supported yet
-		 *  IndexTuple(gist): not supported yet
-		 *  IndexTuple(brin): not supported yet
+		 * HeapTuple: supported IndexTuple(btree): supported for non-unique
+		 * builds IndexTuple(hash): not supported because there is only one
+		 * key DatumTuple: not supported because there is only one key
+		 * HeapTuple(for cluster): not supported yet IndexTuple(gist): not
+		 * supported yet IndexTuple(brin): not supported yet
 		 */
 		if (enable_mk_sort &&
 			state->base.nKeys > 1 &&
 			state->base.mkqsTupleType != MKQS_TUPLE_TYPE_UNSUPPORTED)
 		{
+			MkqsContext mkqsContext;
 			bool		use_radix = false;
 
 			/* Check whether radix sort supports the leading key. */
@@ -3093,16 +3099,19 @@ tuplesort_sort_memtuples(Tuplesortstate *state)
 			if (!use_radix)
 			{
 				if (mkqs_full_order_presorted(state->memtuples,
-									  state->memtupcount, state))
+											  state->memtupcount, state))
 					return;
 				state->mkqsTopPresortFailed = true;
 			}
+
+			mkqs_init_context(state, &mkqsContext);
 			if (state->memtupcount >= QSORT_THRESHOLD && use_radix)
 			{
 				radix_sort_tuple(state->memtuples,
-							 state->memtupcount,
-							 state,
-							 true);
+								 state->memtupcount,
+								 state,
+								 true,
+								 &mkqsContext);
 			}
 			else
 			{
@@ -3110,8 +3119,10 @@ tuplesort_sort_memtuples(Tuplesortstate *state)
 							   state->memtupcount,
 							   0,
 							   state,
-							   false);
+							   false,
+							   &mkqsContext);
 			}
+			mkqs_destroy_context(&mkqsContext);
 			verify_memtuples_sorted(state);
 
 			return;
@@ -3132,9 +3143,10 @@ tuplesort_sort_memtuples(Tuplesortstate *state)
 				 ssup->comparator == ssup_datum_int32_cmp))
 			{
 				radix_sort_tuple(state->memtuples,
-							 state->memtupcount,
-							 state,
-							 false);
+								 state->memtupcount,
+								 state,
+								 false,
+								 NULL);
 				verify_memtuples_sorted(state);
 				return;
 			}
