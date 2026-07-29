@@ -2677,8 +2677,7 @@ normalize_datum(Datum orig, SortSupport ssup)
  */
 static void
 radix_sort_recursive(SortTuple *begin, size_t n_elems, int level,
-					 Tuplesortstate *state, bool use_mksort_tiebreak,
-					 MkqsContext *mkqsContext)
+					 Tuplesortstate *state, bool use_mksort_tiebreak)
 {
 	RadixSortInfo partitions[256] = {0};
 	uint8		remaining_partitions[256];
@@ -2691,8 +2690,6 @@ radix_sort_recursive(SortTuple *begin, size_t n_elems, int level,
 	size_t		start_offset = 0;
 	SortTuple  *partition_begin = begin;
 	int			next_level;
-
-	Assert(!use_mksort_tiebreak || mkqsContext != NULL);
 
 	/* count number of occurrences of each byte */
 	ref_datum = normalize_datum(begin[0].datum1, ssup);
@@ -2838,8 +2835,7 @@ radix_sort_recursive(SortTuple *begin, size_t n_elems, int level,
 										 num_elements,
 										 next_level,
 										 state,
-										 use_mksort_tiebreak,
-										 mkqsContext);
+										 use_mksort_tiebreak);
 				}
 			}
 			else if (state->base.onlyKey == NULL)
@@ -2856,8 +2852,7 @@ radix_sort_recursive(SortTuple *begin, size_t n_elems, int level,
 								   num_elements,
 								   1,
 								   state,
-								   false,
-								   mkqsContext);
+								   false);
 				}
 				else
 					qsort_tuple(partition_begin,
@@ -2880,7 +2875,7 @@ radix_sort_recursive(SortTuple *begin, size_t n_elems, int level,
  */
 static void
 radix_sort_tuple(SortTuple *data, size_t n, Tuplesortstate *state,
-				 bool use_mksort_tiebreak, MkqsContext *mkqsContext)
+				 bool use_mksort_tiebreak)
 {
 	bool		nulls_first = state->base.sortKeys[0].ssup_nulls_first;
 	SortTuple  *null_start;
@@ -2889,8 +2884,6 @@ radix_sort_tuple(SortTuple *data, size_t n, Tuplesortstate *state,
 				d2,
 				null_count,
 				not_null_count;
-
-	Assert(!use_mksort_tiebreak || mkqsContext != NULL);
 
 	/*
 	 * Find the first NOT NULL if NULLS FIRST, or first NULL if NULLS LAST.
@@ -2979,8 +2972,7 @@ radix_sort_tuple(SortTuple *data, size_t n, Tuplesortstate *state,
 						   null_count,
 						   1,
 						   state,
-						   true,
-						   mkqsContext);
+						   true);
 		}
 		else
 			qsort_tuple(null_start,
@@ -3025,8 +3017,7 @@ radix_sort_tuple(SortTuple *data, size_t n, Tuplesortstate *state,
 								 not_null_count,
 								 0,
 								 state,
-								 use_mksort_tiebreak,
-								 mkqsContext);
+								 use_mksort_tiebreak);
 		}
 	}
 }
@@ -3074,7 +3065,6 @@ tuplesort_sort_memtuples(Tuplesortstate *state)
 			state->base.nKeys > 1 &&
 			state->base.mkqsTupleType != MKQS_TUPLE_TYPE_UNSUPPORTED)
 		{
-			MkqsContext mkqsContext;
 			bool		use_radix = false;
 
 			/* Check whether radix sort supports the leading key. */
@@ -3104,14 +3094,12 @@ tuplesort_sort_memtuples(Tuplesortstate *state)
 				state->mkqsTopPresortFailed = true;
 			}
 
-			mkqs_init_context(state, &mkqsContext);
 			if (state->memtupcount >= QSORT_THRESHOLD && use_radix)
 			{
 				radix_sort_tuple(state->memtuples,
 								 state->memtupcount,
 								 state,
-								 true,
-								 &mkqsContext);
+								 true);
 			}
 			else
 			{
@@ -3119,10 +3107,8 @@ tuplesort_sort_memtuples(Tuplesortstate *state)
 							   state->memtupcount,
 							   0,
 							   state,
-							   false,
-							   &mkqsContext);
+							   false);
 			}
-			mkqs_destroy_context(&mkqsContext);
 			verify_memtuples_sorted(state);
 
 			return;
@@ -3145,8 +3131,7 @@ tuplesort_sort_memtuples(Tuplesortstate *state)
 				radix_sort_tuple(state->memtuples,
 								 state->memtupcount,
 								 state,
-								 false,
-								 NULL);
+								 false);
 				verify_memtuples_sorted(state);
 				return;
 			}

@@ -29,32 +29,15 @@ typedef struct MkqsPartitionBounds
 	int			greaterEnd;
 } MkqsPartitionBounds;
 
-typedef int (*MkqsCompareKeyFunc) (SortTuple *a, SortTuple *b,
-								   SortSupport sortKey,
-								   Tuplesortstate *state);
-typedef Datum (*MkqsGetDatumFunc) (SortTuple *tuple, SortSupport sortKey,
-								   Tuplesortstate *state, bool *isNull);
-typedef struct MkqsContext MkqsContext;
-typedef int (*MkqsComparePivotFunc) (SortTuple *tuple,
-									 MkqsContext *context);
-
-typedef struct MkqsKeyCallbacks
-{
-	/* Both callbacks include tuple access and datum comparison. */
-	MkqsCompareKeyFunc compare_tuple;
-	MkqsComparePivotFunc compare_to_pivot;
-} MkqsKeyCallbacks;
-
-struct MkqsContext
-{
-	Tuplesortstate *state;
-	MkqsGetDatumFunc get_datum;
-	MkqsKeyCallbacks *keys;
-	SortSupport sortKey;
-	Datum		pivotDatum;
-	Datum		pivotFullDatum;
-	bool		pivotIsNull;
-};
+typedef int (*MkqsCompareDatumTyped) (Datum datum1, Datum datum2,
+									  SortSupport sortKey);
+typedef int (*MkqsCompareTuple) (SortTuple *a, SortTuple *b, int depth,
+								 Tuplesortstate *state,
+								 MkqsCompareDatumTyped compare_datum_typed);
+typedef bool (*MkqsPartition) (SortTuple *x, size_t n, int depth,
+							   Tuplesortstate *state,
+							   MkqsCompareDatumTyped compare_datum_typed,
+							   MkqsPartitionBounds *bounds);
 
 /* Swap two tuples in sort tuple array */
 static pg_attribute_always_inline void
@@ -122,12 +105,12 @@ mkqs_get_index_datum(SortTuple *tuple, SortSupport sortKey,
 	return mkqs_get_datum_index_btree(tuple, depth, state, isNull);
 }
 
-#if SIZEOF_DATUM >= 8
-/* Inline scalar comparators used inside the coarse-grained callbacks. */
+/* Apply NULL and direction semantics around one non-NULL datum comparator. */
 static pg_attribute_always_inline int
-mkqs_compare_signed_datums(Datum datum1, bool isNull1,
-						   Datum datum2, bool isNull2,
-						   SortSupport sortKey)
+mkqs_compare_datum(Datum datum1, bool isNull1,
+				   Datum datum2, bool isNull2,
+				   SortSupport sortKey,
+				   MkqsCompareDatumTyped compare_datum_typed)
 {
 	int			compare;
 
@@ -138,110 +121,29 @@ mkqs_compare_signed_datums(Datum datum1, bool isNull1,
 		return isNull1 == sortKey->ssup_nulls_first ? -1 : 1;
 	}
 
-	compare = (DatumGetInt64(datum1) > DatumGetInt64(datum2)) -
-		(DatumGetInt64(datum1) < DatumGetInt64(datum2));
+	compare = compare_datum_typed(datum1, datum2, sortKey);
 	if (sortKey->ssup_reverse)
 		INVERT_COMPARE_RESULT(compare);
 	return compare;
 }
 
-static pg_attribute_always_inline int
-mkqs_compare_unsigned_datums(Datum datum1, bool isNull1,
-							 Datum datum2, bool isNull2,
-							 SortSupport sortKey)
-{
-	int			compare;
-
-	if (isNull1 || isNull2)
-	{
-		if (isNull1 && isNull2)
-			return 0;
-		return isNull1 == sortKey->ssup_nulls_first ? -1 : 1;
-	}
-
-	compare = (DatumGetUInt64(datum1) > DatumGetUInt64(datum2)) -
-		(DatumGetUInt64(datum1) < DatumGetUInt64(datum2));
-	if (sortKey->ssup_reverse)
-		INVERT_COMPARE_RESULT(compare);
-	return compare;
-}
-#endif
-
-static pg_attribute_always_inline int
-mkqs_compare_int32_datums(Datum datum1, bool isNull1,
-						  Datum datum2, bool isNull2,
-						  SortSupport sortKey)
-{
-	int			compare;
-
-	if (isNull1 || isNull2)
-	{
-		if (isNull1 && isNull2)
-			return 0;
-		return isNull1 == sortKey->ssup_nulls_first ? -1 : 1;
-	}
-
-	compare = (DatumGetInt32(datum1) > DatumGetInt32(datum2)) -
-		(DatumGetInt32(datum1) < DatumGetInt32(datum2));
-	if (sortKey->ssup_reverse)
-		INVERT_COMPARE_RESULT(compare);
-	return compare;
-}
-
-/* Fetch both full datums for one key, using datum1 for the leading key. */
-static pg_attribute_always_inline void
-mkqs_get_heap_key_datums(SortTuple *a, SortTuple *b, SortSupport sortKey,
-						 Tuplesortstate *state,
-						 Datum *datum1, bool *isNull1,
-						 Datum *datum2, bool *isNull2)
-{
-	if (sortKey == state->base.sortKeys)
-	{
-		*datum1 = a->datum1;
-		*isNull1 = a->isnull1;
-		*datum2 = b->datum1;
-		*isNull2 = b->isnull1;
-		return;
-	}
-
-	*datum1 = mkqs_get_heap_datum(a, sortKey, state, isNull1);
-	*datum2 = mkqs_get_heap_datum(b, sortKey, state, isNull2);
-}
-
-static pg_attribute_always_inline void
-mkqs_get_index_key_datums(SortTuple *a, SortTuple *b, SortSupport sortKey,
-						  Tuplesortstate *state,
-						  Datum *datum1, bool *isNull1,
-						  Datum *datum2, bool *isNull2)
-{
-	if (sortKey == state->base.sortKeys)
-	{
-		*datum1 = a->datum1;
-		*isNull1 = a->isnull1;
-		*datum2 = b->datum1;
-		*isNull2 = b->isnull1;
-		return;
-	}
-
-	*datum1 = mkqs_get_index_datum(a, sortKey, state, isNull1);
-	*datum2 = mkqs_get_index_datum(b, sortKey, state, isNull2);
-}
-
-/* Generic exact-key callbacks, including abbreviated-key resolution. */
 static int
-mkqs_compare_heap_key(SortTuple *a, SortTuple *b, SortSupport sortKey,
-					  Tuplesortstate *state)
+mkqs_compare_tuple_heap(SortTuple *a, SortTuple *b, int depth,
+						Tuplesortstate *state,
+						MkqsCompareDatumTyped compare_datum_typed)
 {
+	SortSupport sortKey = &state->base.sortKeys[depth];
 	Datum		datum1;
 	Datum		datum2;
 	bool		isNull1;
 	bool		isNull2;
 	int			compare;
 
-	if (sortKey == state->base.sortKeys)
+	if (depth == 0)
 	{
-		compare = ApplySortComparator(a->datum1, a->isnull1,
-									  b->datum1, b->isnull1, sortKey);
+		compare = mkqs_compare_datum(a->datum1, a->isnull1,
+									 b->datum1, b->isnull1,
+									 sortKey, compare_datum_typed);
 		if (compare != 0 || !sortKey->abbrev_converter ||
 			a->isnull1 || b->isnull1)
 			return compare;
@@ -249,31 +151,33 @@ mkqs_compare_heap_key(SortTuple *a, SortTuple *b, SortSupport sortKey,
 		datum1 = mkqs_get_heap_datum(a, sortKey, state, &isNull1);
 		datum2 = mkqs_get_heap_datum(b, sortKey, state, &isNull2);
 		Assert(!isNull1 && !isNull2);
-		compare = sortKey->abbrev_full_comparator(datum1, datum2, sortKey);
-		if (sortKey->ssup_reverse)
-			INVERT_COMPARE_RESULT(compare);
-		return compare;
+		return mkqs_compare_datum(datum1, false, datum2, false, sortKey,
+								  sortKey->abbrev_full_comparator);
 	}
 
-	mkqs_get_heap_key_datums(a, b, sortKey, state,
-							 &datum1, &isNull1, &datum2, &isNull2);
-	return ApplySortComparator(datum1, isNull1, datum2, isNull2, sortKey);
+	datum1 = mkqs_get_heap_datum(a, sortKey, state, &isNull1);
+	datum2 = mkqs_get_heap_datum(b, sortKey, state, &isNull2);
+	return mkqs_compare_datum(datum1, isNull1, datum2, isNull2, sortKey,
+							  compare_datum_typed);
 }
 
 static int
-mkqs_compare_index_key(SortTuple *a, SortTuple *b, SortSupport sortKey,
-					   Tuplesortstate *state)
+mkqs_compare_tuple_index_btree(SortTuple *a, SortTuple *b, int depth,
+							   Tuplesortstate *state,
+							   MkqsCompareDatumTyped compare_datum_typed)
 {
+	SortSupport sortKey = &state->base.sortKeys[depth];
 	Datum		datum1;
 	Datum		datum2;
 	bool		isNull1;
 	bool		isNull2;
 	int			compare;
 
-	if (sortKey == state->base.sortKeys)
+	if (depth == 0)
 	{
-		compare = ApplySortComparator(a->datum1, a->isnull1,
-									  b->datum1, b->isnull1, sortKey);
+		compare = mkqs_compare_datum(a->datum1, a->isnull1,
+									 b->datum1, b->isnull1,
+									 sortKey, compare_datum_typed);
 		if (compare != 0 || !sortKey->abbrev_converter ||
 			a->isnull1 || b->isnull1)
 			return compare;
@@ -281,338 +185,105 @@ mkqs_compare_index_key(SortTuple *a, SortTuple *b, SortSupport sortKey,
 		datum1 = mkqs_get_index_datum(a, sortKey, state, &isNull1);
 		datum2 = mkqs_get_index_datum(b, sortKey, state, &isNull2);
 		Assert(!isNull1 && !isNull2);
-		compare = sortKey->abbrev_full_comparator(datum1, datum2, sortKey);
-		if (sortKey->ssup_reverse)
-			INVERT_COMPARE_RESULT(compare);
-		return compare;
+		return mkqs_compare_datum(datum1, false, datum2, false, sortKey,
+								  sortKey->abbrev_full_comparator);
 	}
 
-	mkqs_get_index_key_datums(a, b, sortKey, state,
-							  &datum1, &isNull1, &datum2, &isNull2);
-	return ApplySortComparator(datum1, isNull1, datum2, isNull2, sortKey);
+	datum1 = mkqs_get_index_datum(a, sortKey, state, &isNull1);
+	datum2 = mkqs_get_index_datum(b, sortKey, state, &isNull2);
+	return mkqs_compare_datum(datum1, isNull1, datum2, isNull2, sortKey,
+							  compare_datum_typed);
 }
 
-#if SIZEOF_DATUM >= 8
-/* Scalar exact-key callbacks keep accessor and comparison in one call. */
-static int
-mkqs_compare_heap_signed_key(SortTuple *a, SortTuple *b,
-							 SortSupport sortKey, Tuplesortstate *state)
+static pg_attribute_always_inline int
+mkqs_compare_heap_to_pivot(SortTuple *tuple, int depth,
+						   Tuplesortstate *state, SortSupport sortKey,
+						   MkqsCompareDatumTyped compare_datum_typed,
+						   Datum pivotDatum, bool pivotIsNull,
+						   Datum pivotFullDatum)
 {
-	Datum		datum1;
-	Datum		datum2;
-	bool		isNull1;
-	bool		isNull2;
-
-	mkqs_get_heap_key_datums(a, b, sortKey, state,
-							 &datum1, &isNull1, &datum2, &isNull2);
-	return mkqs_compare_signed_datums(datum1, isNull1, datum2, isNull2,
-									  sortKey);
-}
-
-static int
-mkqs_compare_heap_unsigned_key(SortTuple *a, SortTuple *b,
-							   SortSupport sortKey, Tuplesortstate *state)
-{
-	Datum		datum1;
-	Datum		datum2;
-	bool		isNull1;
-	bool		isNull2;
-
-	mkqs_get_heap_key_datums(a, b, sortKey, state,
-							 &datum1, &isNull1, &datum2, &isNull2);
-	return mkqs_compare_unsigned_datums(datum1, isNull1, datum2, isNull2,
-										sortKey);
-}
-
-static int
-mkqs_compare_index_signed_key(SortTuple *a, SortTuple *b,
-							  SortSupport sortKey, Tuplesortstate *state)
-{
-	Datum		datum1;
-	Datum		datum2;
-	bool		isNull1;
-	bool		isNull2;
-
-	mkqs_get_index_key_datums(a, b, sortKey, state,
-							  &datum1, &isNull1, &datum2, &isNull2);
-	return mkqs_compare_signed_datums(datum1, isNull1, datum2, isNull2,
-									  sortKey);
-}
-
-static int
-mkqs_compare_index_unsigned_key(SortTuple *a, SortTuple *b,
-								SortSupport sortKey, Tuplesortstate *state)
-{
-	Datum		datum1;
-	Datum		datum2;
-	bool		isNull1;
-	bool		isNull2;
-
-	mkqs_get_index_key_datums(a, b, sortKey, state,
-							  &datum1, &isNull1, &datum2, &isNull2);
-	return mkqs_compare_unsigned_datums(datum1, isNull1, datum2, isNull2,
-										sortKey);
-}
-#endif
-
-/* 32-bit scalar exact-key callbacks. */
-static int
-mkqs_compare_heap_int32_key(SortTuple *a, SortTuple *b,
-							SortSupport sortKey, Tuplesortstate *state)
-{
-	Datum		datum1;
-	Datum		datum2;
-	bool		isNull1;
-	bool		isNull2;
-
-	mkqs_get_heap_key_datums(a, b, sortKey, state,
-							 &datum1, &isNull1, &datum2, &isNull2);
-	return mkqs_compare_int32_datums(datum1, isNull1, datum2, isNull2,
-									 sortKey);
-}
-
-static int
-mkqs_compare_index_int32_key(SortTuple *a, SortTuple *b,
-							 SortSupport sortKey, Tuplesortstate *state)
-{
-	Datum		datum1;
-	Datum		datum2;
-	bool		isNull1;
-	bool		isNull2;
-
-	mkqs_get_index_key_datums(a, b, sortKey, state,
-							  &datum1, &isNull1, &datum2, &isNull2);
-	return mkqs_compare_int32_datums(datum1, isNull1, datum2, isNull2,
-									 sortKey);
-}
-
-/* Cache the partition pivot once using the selected tuple representation. */
-static void
-mkqs_init_pivot(SortTuple *pivot, int depth, MkqsContext *context)
-{
-	Tuplesortstate *state = context->state;
-
-	context->sortKey = &state->base.sortKeys[depth];
-	context->pivotFullDatum = (Datum) 0;
+	Datum		datum;
+	bool		isNull;
+	int			compare;
 
 	if (depth == 0)
 	{
-		context->pivotDatum = pivot->datum1;
-		context->pivotIsNull = pivot->isnull1;
-		if (context->sortKey->abbrev_converter && !pivot->isnull1)
+		compare = mkqs_compare_datum(tuple->datum1, tuple->isnull1,
+									 pivotDatum, pivotIsNull,
+									 sortKey, compare_datum_typed);
+		if (compare != 0 || !sortKey->abbrev_converter ||
+			tuple->isnull1 || pivotIsNull)
+			return compare;
+
+		datum = mkqs_get_heap_datum(tuple, sortKey, state, &isNull);
+		Assert(!isNull);
+		return mkqs_compare_datum(datum, false, pivotFullDatum, false,
+								  sortKey, sortKey->abbrev_full_comparator);
+	}
+
+	datum = mkqs_get_heap_datum(tuple, sortKey, state, &isNull);
+	return mkqs_compare_datum(datum, isNull, pivotDatum, pivotIsNull,
+							  sortKey, compare_datum_typed);
+}
+
+static pg_attribute_always_inline int
+mkqs_compare_index_btree_to_pivot(SortTuple *tuple, int depth,
+								  Tuplesortstate *state, SortSupport sortKey,
+								  MkqsCompareDatumTyped compare_datum_typed,
+								  Datum pivotDatum, bool pivotIsNull,
+								  Datum pivotFullDatum)
+{
+	Datum		datum;
+	bool		isNull;
+	int			compare;
+
+	if (depth == 0)
+	{
+		compare = mkqs_compare_datum(tuple->datum1, tuple->isnull1,
+									 pivotDatum, pivotIsNull,
+									 sortKey, compare_datum_typed);
+		if (compare != 0 || !sortKey->abbrev_converter ||
+			tuple->isnull1 || pivotIsNull)
+			return compare;
+
+		datum = mkqs_get_index_datum(tuple, sortKey, state, &isNull);
+		Assert(!isNull);
+		return mkqs_compare_datum(datum, false, pivotFullDatum, false,
+								  sortKey, sortKey->abbrev_full_comparator);
+	}
+
+	datum = mkqs_get_index_datum(tuple, sortKey, state, &isNull);
+	return mkqs_compare_datum(datum, isNull, pivotDatum, pivotIsNull,
+							  sortKey, compare_datum_typed);
+}
+
+/* Partition around x[0], comparing only the current key depth. */
+static bool
+mkqs_partition_heap(SortTuple *x, size_t n, int depth,
+					Tuplesortstate *state,
+					MkqsCompareDatumTyped compare_datum_typed,
+					MkqsPartitionBounds *bounds)
+{
+	SortSupport sortKey = &state->base.sortKeys[depth];
+	Datum		pivotDatum;
+	Datum		pivotFullDatum = (Datum) 0;
+	bool		pivotIsNull;
+	int32		dist;
+
+	if (depth == 0)
+	{
+		pivotDatum = x->datum1;
+		pivotIsNull = x->isnull1;
+		if (sortKey->abbrev_converter && !pivotIsNull)
 		{
 			bool		isNull;
 
-			context->pivotFullDatum =
-				context->get_datum(pivot, context->sortKey, state, &isNull);
+			pivotFullDatum = mkqs_get_heap_datum(x, sortKey, state, &isNull);
 			Assert(!isNull);
 		}
 	}
 	else
-		context->pivotDatum = context->get_datum(pivot, context->sortKey,
-												 state, &context->pivotIsNull);
-}
-
-/* Generic leading-key pivot callbacks resolve abbreviation when necessary. */
-static int
-mkqs_compare_heap_leading_to_pivot(SortTuple *tuple,
-								   MkqsContext *context)
-{
-	int			compare;
-
-	compare = ApplySortComparator(tuple->datum1, tuple->isnull1,
-								  context->pivotDatum,
-								  context->pivotIsNull, context->sortKey);
-	if (compare != 0 || !context->sortKey->abbrev_converter ||
-		tuple->isnull1 || context->pivotIsNull)
-		return compare;
-
-	{
-		Datum		datum;
-		bool		isNull;
-
-		datum = mkqs_get_heap_datum(tuple, context->sortKey,
-									context->state, &isNull);
-		Assert(!isNull);
-		compare = context->sortKey->abbrev_full_comparator(datum,
-														   context->pivotFullDatum,
-														   context->sortKey);
-		if (context->sortKey->ssup_reverse)
-			INVERT_COMPARE_RESULT(compare);
-	}
-	return compare;
-}
-
-static int
-mkqs_compare_index_leading_to_pivot(SortTuple *tuple,
-									MkqsContext *context)
-{
-	int			compare;
-
-	compare = ApplySortComparator(tuple->datum1, tuple->isnull1,
-								  context->pivotDatum,
-								  context->pivotIsNull, context->sortKey);
-	if (compare != 0 || !context->sortKey->abbrev_converter ||
-		tuple->isnull1 || context->pivotIsNull)
-		return compare;
-
-	{
-		Datum		datum;
-		bool		isNull;
-
-		datum = mkqs_get_index_datum(tuple, context->sortKey,
-									 context->state, &isNull);
-		Assert(!isNull);
-		compare = context->sortKey->abbrev_full_comparator(datum,
-														   context->pivotFullDatum,
-														   context->sortKey);
-		if (context->sortKey->ssup_reverse)
-			INVERT_COMPARE_RESULT(compare);
-	}
-	return compare;
-}
-
-static int
-mkqs_compare_heap_datum_to_pivot(SortTuple *tuple,
-								 MkqsContext *context)
-{
-	Datum		datum;
-	bool		isNull;
-
-	datum = mkqs_get_heap_datum(tuple, context->sortKey, context->state,
-								&isNull);
-	return ApplySortComparator(datum, isNull, context->pivotDatum,
-							   context->pivotIsNull, context->sortKey);
-}
-
-static int
-mkqs_compare_index_datum_to_pivot(SortTuple *tuple,
-								  MkqsContext *context)
-{
-	Datum		datum;
-	bool		isNull;
-
-	datum = mkqs_get_index_datum(tuple, context->sortKey, context->state,
-								 &isNull);
-	return ApplySortComparator(datum, isNull, context->pivotDatum,
-							   context->pivotIsNull, context->sortKey);
-}
-
-#if SIZEOF_DATUM >= 8
-/* Scalar pivot callbacks combine datum access and direct comparison. */
-static int
-mkqs_compare_signed_leading_to_pivot(SortTuple *tuple,
-									 MkqsContext *context)
-{
-	return mkqs_compare_signed_datums(tuple->datum1, tuple->isnull1,
-									  context->pivotDatum, context->pivotIsNull,
-									  context->sortKey);
-}
-
-static int
-mkqs_compare_unsigned_leading_to_pivot(SortTuple *tuple,
-									   MkqsContext *context)
-{
-	return mkqs_compare_unsigned_datums(tuple->datum1, tuple->isnull1,
-										context->pivotDatum, context->pivotIsNull,
-										context->sortKey);
-}
-
-static int
-mkqs_compare_heap_signed_to_pivot(SortTuple *tuple,
-								  MkqsContext *context)
-{
-	Datum		datum;
-	bool		isNull;
-
-	datum = mkqs_get_heap_datum(tuple, context->sortKey, context->state,
-								&isNull);
-	return mkqs_compare_signed_datums(datum, isNull, context->pivotDatum,
-									  context->pivotIsNull, context->sortKey);
-}
-
-static int
-mkqs_compare_heap_unsigned_to_pivot(SortTuple *tuple,
-									MkqsContext *context)
-{
-	Datum		datum;
-	bool		isNull;
-
-	datum = mkqs_get_heap_datum(tuple, context->sortKey, context->state,
-								&isNull);
-	return mkqs_compare_unsigned_datums(datum, isNull, context->pivotDatum,
-										context->pivotIsNull, context->sortKey);
-}
-
-static int
-mkqs_compare_index_signed_to_pivot(SortTuple *tuple,
-								   MkqsContext *context)
-{
-	Datum		datum;
-	bool		isNull;
-
-	datum = mkqs_get_index_datum(tuple, context->sortKey, context->state,
-								 &isNull);
-	return mkqs_compare_signed_datums(datum, isNull, context->pivotDatum,
-									  context->pivotIsNull, context->sortKey);
-}
-
-static int
-mkqs_compare_index_unsigned_to_pivot(SortTuple *tuple,
-									 MkqsContext *context)
-{
-	Datum		datum;
-	bool		isNull;
-
-	datum = mkqs_get_index_datum(tuple, context->sortKey, context->state,
-								 &isNull);
-	return mkqs_compare_unsigned_datums(datum, isNull, context->pivotDatum,
-										context->pivotIsNull, context->sortKey);
-}
-#endif
-
-static int
-mkqs_compare_int32_leading_to_pivot(SortTuple *tuple,
-									MkqsContext *context)
-{
-	return mkqs_compare_int32_datums(tuple->datum1, tuple->isnull1,
-									 context->pivotDatum, context->pivotIsNull,
-									 context->sortKey);
-}
-
-static int
-mkqs_compare_heap_int32_to_pivot(SortTuple *tuple,
-								 MkqsContext *context)
-{
-	Datum		datum;
-	bool		isNull;
-
-	datum = mkqs_get_heap_datum(tuple, context->sortKey, context->state,
-								&isNull);
-	return mkqs_compare_int32_datums(datum, isNull, context->pivotDatum,
-									 context->pivotIsNull, context->sortKey);
-}
-
-static int
-mkqs_compare_index_int32_to_pivot(SortTuple *tuple,
-								  MkqsContext *context)
-{
-	Datum		datum;
-	bool		isNull;
-
-	datum = mkqs_get_index_datum(tuple, context->sortKey, context->state,
-								 &isNull);
-	return mkqs_compare_int32_datums(datum, isNull, context->pivotDatum,
-									 context->pivotIsNull, context->sortKey);
-}
-
-/* Partition around x[0], comparing only the current key depth. */
-static void
-mkqs_partition(SortTuple *x, size_t n, MkqsPartitionBounds *bounds,
-			   MkqsComparePivotFunc compare,
-			   MkqsContext *context)
-{
-	int32		dist;
+		pivotDatum = mkqs_get_heap_datum(x, sortKey, state, &pivotIsNull);
 
 	bounds->lessStart = 1;
 	bounds->lessEnd = 1;
@@ -625,7 +296,9 @@ mkqs_partition(SortTuple *x, size_t n, MkqsPartitionBounds *bounds,
 
 		while (bounds->lessEnd <= bounds->greaterStart)
 		{
-			dist = compare(x + bounds->lessEnd, context);
+			dist = mkqs_compare_heap_to_pivot(x + bounds->lessEnd, depth,
+											  state, sortKey, compare_datum_typed,
+											  pivotDatum, pivotIsNull, pivotFullDatum);
 			if (dist > 0)
 				break;
 			if (dist == 0)
@@ -638,7 +311,9 @@ mkqs_partition(SortTuple *x, size_t n, MkqsPartitionBounds *bounds,
 
 		while (bounds->lessEnd <= bounds->greaterStart)
 		{
-			dist = compare(x + bounds->greaterStart, context);
+			dist = mkqs_compare_heap_to_pivot(x + bounds->greaterStart, depth,
+											  state, sortKey, compare_datum_typed,
+											  pivotDatum, pivotIsNull, pivotFullDatum);
 			if (dist < 0)
 				break;
 			if (dist == 0)
@@ -650,7 +325,81 @@ mkqs_partition(SortTuple *x, size_t n, MkqsPartitionBounds *bounds,
 		}
 
 		if (bounds->lessEnd > bounds->greaterStart)
-			return;
+			return pivotIsNull;
+		mkqs_swap(bounds->lessEnd, bounds->greaterStart, x);
+		bounds->lessEnd++;
+		bounds->greaterStart--;
+	}
+}
+
+static bool
+mkqs_partition_index_btree(SortTuple *x, size_t n, int depth,
+						   Tuplesortstate *state,
+						   MkqsCompareDatumTyped compare_datum_typed,
+						   MkqsPartitionBounds *bounds)
+{
+	SortSupport sortKey = &state->base.sortKeys[depth];
+	Datum		pivotDatum;
+	Datum		pivotFullDatum = (Datum) 0;
+	bool		pivotIsNull;
+	int32		dist;
+
+	if (depth == 0)
+	{
+		pivotDatum = x->datum1;
+		pivotIsNull = x->isnull1;
+		if (sortKey->abbrev_converter && !pivotIsNull)
+		{
+			bool		isNull;
+
+			pivotFullDatum = mkqs_get_index_datum(x, sortKey, state, &isNull);
+			Assert(!isNull);
+		}
+	}
+	else
+		pivotDatum = mkqs_get_index_datum(x, sortKey, state, &pivotIsNull);
+
+	bounds->lessStart = 1;
+	bounds->lessEnd = 1;
+	bounds->greaterStart = n - 1;
+	bounds->greaterEnd = n - 1;
+
+	while (true)
+	{
+		CHECK_FOR_INTERRUPTS();
+
+		while (bounds->lessEnd <= bounds->greaterStart)
+		{
+			dist = mkqs_compare_index_btree_to_pivot(x + bounds->lessEnd, depth,
+													 state, sortKey, compare_datum_typed,
+													 pivotDatum, pivotIsNull, pivotFullDatum);
+			if (dist > 0)
+				break;
+			if (dist == 0)
+			{
+				mkqs_swap(bounds->lessEnd, bounds->lessStart, x);
+				bounds->lessStart++;
+			}
+			bounds->lessEnd++;
+		}
+
+		while (bounds->lessEnd <= bounds->greaterStart)
+		{
+			dist = mkqs_compare_index_btree_to_pivot(x + bounds->greaterStart, depth,
+													 state, sortKey, compare_datum_typed,
+													 pivotDatum, pivotIsNull, pivotFullDatum);
+			if (dist < 0)
+				break;
+			if (dist == 0)
+			{
+				mkqs_swap(bounds->greaterStart, bounds->greaterEnd, x);
+				bounds->greaterEnd--;
+			}
+			bounds->greaterStart--;
+		}
+
+		if (bounds->lessEnd > bounds->greaterStart)
+			return pivotIsNull;
 		mkqs_swap(bounds->lessEnd, bounds->greaterStart, x);
 		bounds->lessEnd++;
 		bounds->greaterStart--;
@@ -661,15 +410,14 @@ static pg_attribute_always_inline int
 mkqs_compare_tuple_range(SortTuple *a, SortTuple *b,
 						 int start_depth, int max_depth,
 						 Tuplesortstate *state,
-						 MkqsContext *context)
+						 MkqsCompareTuple compare_tuple)
 {
 	for (int depth = start_depth; depth <= max_depth; depth++)
 	{
+		SortSupport sortKey = &state->base.sortKeys[depth];
 		int			compare;
 
-		compare = context->keys[depth].compare_tuple(a, b,
-													 &state->base.sortKeys[depth],
-													 state);
+		compare = compare_tuple(a, b, depth, state, sortKey->comparator);
 		if (compare != 0)
 			return compare;
 	}
@@ -685,7 +433,7 @@ mkqs_compare_tuple_range(SortTuple *a, SortTuple *b,
 static bool
 mkqs_full_order_presorted_callbacks(SortTuple *x, size_t n,
 									Tuplesortstate *state,
-									MkqsContext *context)
+									MkqsCompareTuple compare_tuple)
 {
 	Assert(state->base.nKeys > 0);
 
@@ -694,12 +442,11 @@ mkqs_full_order_presorted_callbacks(SortTuple *x, size_t n,
 		CHECK_FOR_INTERRUPTS();
 		for (int depth = 0; depth < state->base.nKeys; depth++)
 		{
+			SortSupport sortKey = &state->base.sortKeys[depth];
 			int			compare;
 
-			compare = context->keys[depth].compare_tuple(x + i - 1,
-														 x + i,
-														 &state->base.sortKeys[depth],
-														 state);
+			compare = compare_tuple(x + i - 1, x + i, depth, state,
+									sortKey->comparator);
 			if (compare < 0)
 				break;
 			if (compare > 0)
@@ -734,16 +481,18 @@ mkqs_full_order_presorted(SortTuple *x, size_t n, Tuplesortstate *state)
 static bool
 mkqs_depth_strictly_increasing(SortTuple *x, size_t n, int depth,
 							   Tuplesortstate *state,
-							   MkqsCompareKeyFunc comparekey)
+							   MkqsCompareTuple compare_tuple)
 {
+	SortSupport sortKey = &state->base.sortKeys[depth];
+
 	Assert(depth >= 0);
 	Assert(depth < state->base.nKeys);
 
 	for (size_t i = 1; i < n; i++)
 	{
 		CHECK_FOR_INTERRUPTS();
-		if (comparekey(x + i - 1, x + i, &state->base.sortKeys[depth],
-					   state) >= 0)
+		if (compare_tuple(x + i - 1, x + i, depth, state,
+						  sortKey->comparator) >= 0)
 			return false;
 	}
 
@@ -758,15 +507,21 @@ get_median_from_three(int a,
 					  SortTuple *x,
 					  int depth,
 					  Tuplesortstate *state,
-					  MkqsCompareKeyFunc comparekey)
+					  MkqsCompareTuple compare_tuple)
 {
 	SortSupport sortKey = &state->base.sortKeys[depth];
+	MkqsCompareDatumTyped compare_datum_typed = sortKey->comparator;
 
-	return comparekey(x + a, x + b, sortKey, state) < 0 ?
-		(comparekey(x + b, x + c, sortKey, state) < 0 ? b :
-		 (comparekey(x + a, x + c, sortKey, state) < 0 ? c : a)) :
-		(comparekey(x + b, x + c, sortKey, state) > 0 ? b :
-		 (comparekey(x + a, x + c, sortKey, state) < 0 ? a : c));
+	return compare_tuple(x + a, x + b, depth, state,
+						 compare_datum_typed) < 0 ?
+		(compare_tuple(x + b, x + c, depth, state,
+					   compare_datum_typed) < 0 ? b :
+		 (compare_tuple(x + a, x + c, depth, state,
+						compare_datum_typed) < 0 ? c : a)) :
+		(compare_tuple(x + b, x + c, depth, state,
+					   compare_datum_typed) > 0 ? b :
+		 (compare_tuple(x + a, x + c, depth, state,
+						compare_datum_typed) < 0 ? a : c));
 }
 
 /*
@@ -780,7 +535,8 @@ mk_qsort_tuple_impl(SortTuple *x,
 					int depth,
 					Tuplesortstate *state,
 					bool seenNull,
-					MkqsContext *context)
+					MkqsCompareTuple compare_tuple,
+					MkqsPartition partition)
 {
 	/*
 	 * In the process, the tuple array consists of five parts: left equal,
@@ -830,7 +586,7 @@ mk_qsort_tuple_impl(SortTuple *x,
 			{
 				if (mkqs_compare_tuple_range(x + l - 1, x + l, depth,
 											 state->base.nKeys - 1, state,
-											 context) <= 0)
+											 compare_tuple) <= 0)
 					break;
 				mkqs_swap(l, l - 1, x);
 			}
@@ -841,14 +597,14 @@ mk_qsort_tuple_impl(SortTuple *x,
 	{
 		/* The caller may already have performed and failed this exact scan. */
 		if (!state->mkqsTopPresortFailed &&
-			mkqs_full_order_presorted_callbacks(x, n, state, context))
+			mkqs_full_order_presorted_callbacks(x, n, state, compare_tuple))
 			return;
 	}
 	else
 	{
 		/* For current depth, perform strictly increasing check */
 		if (mkqs_depth_strictly_increasing(x, n, depth, state,
-										   context->keys[depth].compare_tuple))
+										   compare_tuple))
 			return;
 	}
 
@@ -860,20 +616,18 @@ mk_qsort_tuple_impl(SortTuple *x,
 	{
 		d = n / 8;
 		l = get_median_from_three(l, l + d, l + 2 * d, x, depth,
-								  state, context->keys[depth].compare_tuple);
+								  state, compare_tuple);
 		m = get_median_from_three(m - d, m, m + d, x, depth,
-								  state, context->keys[depth].compare_tuple);
+								  state, compare_tuple);
 		r = get_median_from_three(r - 2 * d, r - d, r, x, depth,
-								  state, context->keys[depth].compare_tuple);
+								  state, compare_tuple);
 	}
 	lessStart = get_median_from_three(l, m, r, x, depth, state,
-									  context->keys[depth].compare_tuple);
+									  compare_tuple);
 	mkqs_swap(0, lessStart, x);
 
-	mkqs_init_pivot(x, depth, context);
-	mkqs_partition(x, n, &bounds, context->keys[depth].compare_to_pivot,
-				   context);
-	isDatumNull = context->pivotIsNull;
+	isDatumNull = partition(x, n, depth, state,
+							state->base.sortKeys[depth].comparator, &bounds);
 
 	lessStart = bounds.lessStart;
 	lessEnd = bounds.lessEnd;
@@ -907,7 +661,8 @@ mk_qsort_tuple_impl(SortTuple *x,
 						depth,
 						state,
 						seenNull,
-						context);
+						compare_tuple,
+						partition);
 
 	/* Recursively sort the equal part */
 
@@ -926,7 +681,8 @@ mk_qsort_tuple_impl(SortTuple *x,
 							depth + 1,
 							state,
 							seenNull || isDatumNull,
-							context);
+							compare_tuple,
+							partition);
 	}
 	else
 	{
@@ -959,90 +715,9 @@ mk_qsort_tuple_impl(SortTuple *x,
 						depth,
 						state,
 						seenNull,
-						context);
+						compare_tuple,
+						partition);
 
-}
-
-/* Select representation- and type-specific callbacks once per top-level sort. */
-static void
-mkqs_init_context(Tuplesortstate *state, MkqsContext *context)
-{
-	bool		heapTuples;
-
-	context->state = state;
-	heapTuples = state->base.mkqsTupleType == MKQS_TUPLE_TYPE_HEAP;
-	if (heapTuples)
-		context->get_datum = mkqs_get_heap_datum;
-	else
-	{
-		Assert(state->base.mkqsTupleType == MKQS_TUPLE_TYPE_INDEX_BTREE);
-		context->get_datum = mkqs_get_index_datum;
-	}
-
-	context->keys = palloc(sizeof(*context->keys) *
-						   state->base.nKeys);
-	for (int keyno = 0; keyno < state->base.nKeys; keyno++)
-	{
-		SortSupport sortKey = &state->base.sortKeys[keyno];
-
-		/* Abbreviation requires the representation-specific full-datum path. */
-		if (keyno == 0 && sortKey->abbrev_converter)
-		{
-			context->keys[keyno].compare_tuple = heapTuples ?
-				mkqs_compare_heap_key : mkqs_compare_index_key;
-			context->keys[keyno].compare_to_pivot = heapTuples ?
-				mkqs_compare_heap_leading_to_pivot :
-				mkqs_compare_index_leading_to_pivot;
-		}
-#if SIZEOF_DATUM >= 8
-		else if (!sortKey->abbrev_converter &&
-				 sortKey->comparator == ssup_datum_signed_cmp)
-		{
-			context->keys[keyno].compare_tuple = heapTuples ?
-				mkqs_compare_heap_signed_key : mkqs_compare_index_signed_key;
-			context->keys[keyno].compare_to_pivot = keyno == 0 ?
-				mkqs_compare_signed_leading_to_pivot :
-				(heapTuples ? mkqs_compare_heap_signed_to_pivot :
-				 mkqs_compare_index_signed_to_pivot);
-		}
-		else if (!sortKey->abbrev_converter &&
-				 sortKey->comparator == ssup_datum_unsigned_cmp)
-		{
-			context->keys[keyno].compare_tuple = heapTuples ?
-				mkqs_compare_heap_unsigned_key : mkqs_compare_index_unsigned_key;
-			context->keys[keyno].compare_to_pivot = keyno == 0 ?
-				mkqs_compare_unsigned_leading_to_pivot :
-				(heapTuples ? mkqs_compare_heap_unsigned_to_pivot :
-				 mkqs_compare_index_unsigned_to_pivot);
-		}
-#endif
-		else if (!sortKey->abbrev_converter &&
-				 sortKey->comparator == ssup_datum_int32_cmp)
-		{
-			context->keys[keyno].compare_tuple = heapTuples ?
-				mkqs_compare_heap_int32_key : mkqs_compare_index_int32_key;
-			context->keys[keyno].compare_to_pivot = keyno == 0 ?
-				mkqs_compare_int32_leading_to_pivot :
-				(heapTuples ? mkqs_compare_heap_int32_to_pivot :
-				 mkqs_compare_index_int32_to_pivot);
-		}
-		else
-		{
-			context->keys[keyno].compare_tuple = heapTuples ?
-				mkqs_compare_heap_key : mkqs_compare_index_key;
-			context->keys[keyno].compare_to_pivot = keyno == 0 ?
-				(heapTuples ? mkqs_compare_heap_leading_to_pivot :
-				 mkqs_compare_index_leading_to_pivot) :
-				(heapTuples ? mkqs_compare_heap_datum_to_pivot :
-				 mkqs_compare_index_datum_to_pivot);
-		}
-	}
-}
-
-static void
-mkqs_destroy_context(MkqsContext *context)
-{
-	pfree(context->keys);
 }
 
 static void
@@ -1050,10 +725,16 @@ mk_qsort_tuple(SortTuple *x,
 			   size_t n,
 			   int depth,
 			   Tuplesortstate *state,
-			   bool seenNull,
-			   MkqsContext *context)
+			   bool seenNull)
 {
-	Assert(context->state == state);
-
-	mk_qsort_tuple_impl(x, n, depth, state, seenNull, context);
+	if (state->base.mkqsTupleType == MKQS_TUPLE_TYPE_HEAP)
+		mk_qsort_tuple_impl(x, n, depth, state, seenNull,
+							mkqs_compare_tuple_heap, mkqs_partition_heap);
+	else
+	{
+		Assert(state->base.mkqsTupleType == MKQS_TUPLE_TYPE_INDEX_BTREE);
+		mk_qsort_tuple_impl(x, n, depth, state, seenNull,
+							mkqs_compare_tuple_index_btree,
+							mkqs_partition_index_btree);
+	}
 }
