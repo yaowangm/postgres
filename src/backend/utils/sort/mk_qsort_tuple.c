@@ -29,6 +29,16 @@ typedef struct MkqsPartitionBounds
 	int			greaterEnd;
 } MkqsPartitionBounds;
 
+/*
+ * compare_datum_typed compares two non-NULL datums in the sort operator's
+ * natural direction.  mkqs_compare_datum() adds NULL and reverse-order
+ * semantics around it.
+ *
+ * compare_tuple and partition are selected once for the tuple representation
+ * at the mk_qsort_tuple() entry point.  The caller supplies the comparator for
+ * the current sort key so that these callbacks need only specialize datum
+ * extraction and tuple layout.
+ */
 typedef int (*MkqsCompareDatumTyped) (Datum datum1, Datum datum2,
 									  SortSupport sortKey);
 typedef int (*MkqsCompareTuple) (SortTuple *a, SortTuple *b, int depth,
@@ -39,7 +49,7 @@ typedef bool (*MkqsPartition) (SortTuple *x, size_t n, int depth,
 							   MkqsCompareDatumTyped compare_datum_typed,
 							   MkqsPartitionBounds *bounds);
 
-/* Swap two tuples in sort tuple array */
+/* Swap two tuples in the sort tuple array. */
 static pg_attribute_always_inline void
 mkqs_swap(int a,
 		  int b,
@@ -54,7 +64,7 @@ mkqs_swap(int a,
 	x[b] = t;
 }
 
-/* Swap tuples by batch in sort tuple array */
+/* Swap two equally sized ranges in the sort tuple array. */
 static inline void
 mkqs_vec_swap(int a,
 			  int b,
@@ -127,6 +137,7 @@ mkqs_compare_datum(Datum datum1, bool isNull1,
 	return compare;
 }
 
+/* Compare two heap SortTuples at exactly one sort-key depth. */
 static int
 mkqs_compare_tuple_heap(SortTuple *a, SortTuple *b, int depth,
 						Tuplesortstate *state,
@@ -141,6 +152,7 @@ mkqs_compare_tuple_heap(SortTuple *a, SortTuple *b, int depth,
 
 	if (depth == 0)
 	{
+		/* datum1 caches the leading key, possibly in abbreviated form. */
 		compare = mkqs_compare_datum(a->datum1, a->isnull1,
 									 b->datum1, b->isnull1,
 									 sortKey, compare_datum_typed);
@@ -148,6 +160,7 @@ mkqs_compare_tuple_heap(SortTuple *a, SortTuple *b, int depth,
 			a->isnull1 || b->isnull1)
 			return compare;
 
+		/* Equal abbreviations must be resolved using the full datums. */
 		datum1 = mkqs_get_heap_datum(a, sortKey, state, &isNull1);
 		datum2 = mkqs_get_heap_datum(b, sortKey, state, &isNull2);
 		Assert(!isNull1 && !isNull2);
@@ -161,6 +174,7 @@ mkqs_compare_tuple_heap(SortTuple *a, SortTuple *b, int depth,
 							  compare_datum_typed);
 }
 
+/* Compare two btree index SortTuples at exactly one sort-key depth. */
 static int
 mkqs_compare_tuple_index_btree(SortTuple *a, SortTuple *b, int depth,
 							   Tuplesortstate *state,
@@ -175,6 +189,7 @@ mkqs_compare_tuple_index_btree(SortTuple *a, SortTuple *b, int depth,
 
 	if (depth == 0)
 	{
+		/* datum1 caches the leading key, possibly in abbreviated form. */
 		compare = mkqs_compare_datum(a->datum1, a->isnull1,
 									 b->datum1, b->isnull1,
 									 sortKey, compare_datum_typed);
@@ -182,6 +197,7 @@ mkqs_compare_tuple_index_btree(SortTuple *a, SortTuple *b, int depth,
 			a->isnull1 || b->isnull1)
 			return compare;
 
+		/* Equal abbreviations must be resolved using the full datums. */
 		datum1 = mkqs_get_index_datum(a, sortKey, state, &isNull1);
 		datum2 = mkqs_get_index_datum(b, sortKey, state, &isNull2);
 		Assert(!isNull1 && !isNull2);
@@ -195,6 +211,10 @@ mkqs_compare_tuple_index_btree(SortTuple *a, SortTuple *b, int depth,
 							  compare_datum_typed);
 }
 
+/*
+ * Compare one heap tuple with an already extracted pivot datum.  Keeping the
+ * pivot outside the loop avoids extracting it for every partition comparison.
+ */
 static pg_attribute_always_inline int
 mkqs_compare_heap_to_pivot(SortTuple *tuple, int depth,
 						   Tuplesortstate *state, SortSupport sortKey,
@@ -208,6 +228,7 @@ mkqs_compare_heap_to_pivot(SortTuple *tuple, int depth,
 
 	if (depth == 0)
 	{
+		/* Both leading values are cached, and might be abbreviations. */
 		compare = mkqs_compare_datum(tuple->datum1, tuple->isnull1,
 									 pivotDatum, pivotIsNull,
 									 sortKey, compare_datum_typed);
@@ -215,6 +236,7 @@ mkqs_compare_heap_to_pivot(SortTuple *tuple, int depth,
 			tuple->isnull1 || pivotIsNull)
 			return compare;
 
+		/* Resolve an abbreviation collision without re-extracting the pivot. */
 		datum = mkqs_get_heap_datum(tuple, sortKey, state, &isNull);
 		Assert(!isNull);
 		return mkqs_compare_datum(datum, false, pivotFullDatum, false,
@@ -226,6 +248,7 @@ mkqs_compare_heap_to_pivot(SortTuple *tuple, int depth,
 							  sortKey, compare_datum_typed);
 }
 
+/* Btree index variant of mkqs_compare_heap_to_pivot(). */
 static pg_attribute_always_inline int
 mkqs_compare_index_btree_to_pivot(SortTuple *tuple, int depth,
 								  Tuplesortstate *state, SortSupport sortKey,
@@ -239,6 +262,7 @@ mkqs_compare_index_btree_to_pivot(SortTuple *tuple, int depth,
 
 	if (depth == 0)
 	{
+		/* Both leading values are cached, and might be abbreviations. */
 		compare = mkqs_compare_datum(tuple->datum1, tuple->isnull1,
 									 pivotDatum, pivotIsNull,
 									 sortKey, compare_datum_typed);
@@ -246,6 +270,7 @@ mkqs_compare_index_btree_to_pivot(SortTuple *tuple, int depth,
 			tuple->isnull1 || pivotIsNull)
 			return compare;
 
+		/* Resolve an abbreviation collision without re-extracting the pivot. */
 		datum = mkqs_get_index_datum(tuple, sortKey, state, &isNull);
 		Assert(!isNull);
 		return mkqs_compare_datum(datum, false, pivotFullDatum, false,
@@ -257,7 +282,13 @@ mkqs_compare_index_btree_to_pivot(SortTuple *tuple, int depth,
 							  sortKey, compare_datum_typed);
 }
 
-/* Partition around x[0], comparing only the current key depth. */
+/*
+ * Partition heap tuples around x[0], comparing only the current key depth.
+ * Tuples equal at this depth accumulate at both ends; bounds describes all
+ * four partition boundaries when the unprocessed range becomes empty.  Return
+ * whether the pivot datum is NULL so recursion can propagate uniqueness
+ * semantics.
+ */
 static bool
 mkqs_partition_heap(SortTuple *x, size_t n, int depth,
 					Tuplesortstate *state,
@@ -270,6 +301,7 @@ mkqs_partition_heap(SortTuple *x, size_t n, int depth,
 	bool		pivotIsNull;
 	int32		dist;
 
+	/* Extract the pivot once before scanning the rest of the partition. */
 	if (depth == 0)
 	{
 		pivotDatum = x->datum1;
@@ -294,6 +326,7 @@ mkqs_partition_heap(SortTuple *x, size_t n, int depth,
 	{
 		CHECK_FOR_INTERRUPTS();
 
+		/* Scan from the left, moving equal values to the left edge. */
 		while (bounds->lessEnd <= bounds->greaterStart)
 		{
 			dist = mkqs_compare_heap_to_pivot(x + bounds->lessEnd, depth,
@@ -309,6 +342,7 @@ mkqs_partition_heap(SortTuple *x, size_t n, int depth,
 			bounds->lessEnd++;
 		}
 
+		/* Scan from the right, moving equal values to the right edge. */
 		while (bounds->lessEnd <= bounds->greaterStart)
 		{
 			dist = mkqs_compare_heap_to_pivot(x + bounds->greaterStart, depth,
@@ -332,6 +366,7 @@ mkqs_partition_heap(SortTuple *x, size_t n, int depth,
 	}
 }
 
+/* Btree index variant of mkqs_partition_heap(). */
 static bool
 mkqs_partition_index_btree(SortTuple *x, size_t n, int depth,
 						   Tuplesortstate *state,
@@ -344,6 +379,7 @@ mkqs_partition_index_btree(SortTuple *x, size_t n, int depth,
 	bool		pivotIsNull;
 	int32		dist;
 
+	/* Extract the pivot once before scanning the rest of the partition. */
 	if (depth == 0)
 	{
 		pivotDatum = x->datum1;
@@ -368,6 +404,7 @@ mkqs_partition_index_btree(SortTuple *x, size_t n, int depth,
 	{
 		CHECK_FOR_INTERRUPTS();
 
+		/* Scan from the left, moving equal values to the left edge. */
 		while (bounds->lessEnd <= bounds->greaterStart)
 		{
 			dist = mkqs_compare_index_btree_to_pivot(x + bounds->lessEnd, depth,
@@ -383,6 +420,7 @@ mkqs_partition_index_btree(SortTuple *x, size_t n, int depth,
 			bounds->lessEnd++;
 		}
 
+		/* Scan from the right, moving equal values to the right edge. */
 		while (bounds->lessEnd <= bounds->greaterStart)
 		{
 			dist = mkqs_compare_index_btree_to_pivot(x + bounds->greaterStart, depth,
@@ -406,6 +444,7 @@ mkqs_partition_index_btree(SortTuple *x, size_t n, int depth,
 	}
 }
 
+/* Compare two tuples over the inclusive range of sort-key depths. */
 static pg_attribute_always_inline int
 mkqs_compare_tuple_range(SortTuple *a, SortTuple *b,
 						 int start_depth, int max_depth,
@@ -457,7 +496,7 @@ mkqs_full_order_presorted_callbacks(SortTuple *x, size_t n,
 	return true;
 }
 
-/* Public precheck used before the mksort callbacks have been selected. */
+/* Precheck used before the mksort tuple callbacks have been selected. */
 static bool
 mkqs_full_order_presorted(SortTuple *x, size_t n, Tuplesortstate *state)
 {
@@ -499,7 +538,7 @@ mkqs_depth_strictly_increasing(SortTuple *x, size_t n, int depth,
 	return true;
 }
 
-/* Find the median of three values */
+/* Return the array index of the median tuple at the current depth. */
 static pg_noinline int
 get_median_from_three(int a,
 					  int b,
@@ -525,9 +564,12 @@ get_median_from_three(int a,
 }
 
 /*
- * Major of multi-key quick sort
+ * Recursively sort x at one key depth using three-way partitioning.
  *
- * seenNull indicates whether we have seen NULL in any datum we checked
+ * compare_tuple and partition remain fixed for the tuple representation
+ * throughout recursion.  Each comparison receives the current sort key's
+ * typed comparator.  seenNull records whether any preceding equal key was
+ * NULL, which the terminal duplicate handler needs for uniqueness checks.
  */
 static void
 mk_qsort_tuple_impl(SortTuple *x,
@@ -539,14 +581,11 @@ mk_qsort_tuple_impl(SortTuple *x,
 					MkqsPartition partition)
 {
 	/*
-	 * In the process, the tuple array consists of five parts: left equal,
-	 * less, not-processed, greater, right equal
-	 *
-	 * lessStart indicates the first position of less part lessEnd indicates
-	 * the next position after less part greaterStart indicates the prior
-	 * position before greater part greaterEnd indicates the latest position
-	 * of greater part the range between lessEnd and greaterStart (inclusive)
-	 * is not-processed
+	 * During partitioning, the four indexes delimit the ranges [0,
+	 * lessStart), [lessStart, lessEnd), [lessEnd, greaterStart],
+	 * (greaterStart, greaterEnd], and (greaterEnd, n).  From left to right,
+	 * these contain values equal to the pivot, less than the pivot,
+	 * unprocessed, greater than the pivot, and equal to the pivot.
 	 */
 	int			lessStart,
 				lessEnd,
@@ -566,7 +605,7 @@ mk_qsort_tuple_impl(SortTuple *x,
 	if (n <= 1)
 		return;
 
-	/* If we have exceeded the max depth, return immediately */
+	/* If we have reached the maximum depth, return immediately. */
 	if (depth == state->base.nKeys)
 		return;
 
@@ -602,13 +641,13 @@ mk_qsort_tuple_impl(SortTuple *x,
 	}
 	else
 	{
-		/* For current depth, perform strictly increasing check */
+		/* Check whether the current depth is already strictly increasing. */
 		if (mkqs_depth_strictly_increasing(x, n, depth, state,
 										   compare_tuple))
 			return;
 	}
 
-	/* Select pivot by random and move it to the first position */
+	/* Select a median-of-three/pseudomedian pivot and move it to x[0]. */
 	m = n / 2;
 	l = 0;
 	r = n - 1;
@@ -635,26 +674,24 @@ mk_qsort_tuple_impl(SortTuple *x,
 	greaterEnd = bounds.greaterEnd;
 
 	/*
-	 * Now the array has four parts: left equal, lesser, greater, right equal
-	 * Note greaterStart is less than lessEnd now
+	 * The unprocessed range is now empty, leaving the left-equal, lesser,
+	 * greater, and right-equal ranges.  Move both equal ranges to the middle.
 	 */
 
-	/* Move the left equal part to middle */
+	/* Move the left equal part to the middle. */
 	dist = Min(lessStart, lessEnd - lessStart);
 	mkqs_vec_swap(0, lessEnd - dist, dist, x);
 
-	/* Move the right equal part to middle */
+	/* Move the right equal part to the middle. */
 	dist = Min(greaterEnd - greaterStart, n - greaterEnd - 1);
 	mkqs_vec_swap(lessEnd, n - dist, dist, x);
 
 	/*
-	 * Now the array has three parts: lesser, equal, greater Note that one or
-	 * two parts may have no element at all.
+	 * The array now has lesser, equal, and greater parts; the lesser or
+	 * greater part may be empty.
 	 */
 
-	/* Recursively sort the lesser part */
-
-	/* dist means the size of less part */
+	/* Recursively sort the lesser part at the same depth. */
 	dist = lessEnd - lessStart;
 	mk_qsort_tuple_impl(x,
 						dist,
@@ -664,14 +701,11 @@ mk_qsort_tuple_impl(SortTuple *x,
 						compare_tuple,
 						partition);
 
-	/* Recursively sort the equal part */
-
 	/*
-	 * (x + dist) means the first tuple in the equal part Since all tuples
-	 * have equal datums at current depth, we just check any one of them to
-	 * determine whether we have seen null datum.
+	 * Recurse to the next depth for the equal part.  Since every tuple in
+	 * this part has the same current datum, the pivot's NULL flag represents
+	 * the whole part.
 	 */
-	/* (lessStart + n - greaterEnd - 1) means the size of equal part */
 	tupCount = lessStart + n - greaterEnd - 1;
 
 	if (depth < state->base.nKeys - 1)
@@ -687,14 +721,8 @@ mk_qsort_tuple_impl(SortTuple *x,
 	else
 	{
 		/*
-		 * We have reach the max depth: Call mkqsHandleDupFunc to handle
-		 * duplicated tuples if necessary, e.g. checking uniqueness or extra
-		 * comparing
-		 */
-
-		/*
-		 * Call mkqsHandleDupFunc if: 1. mkqsHandleDupFunc is filled 2. the
-		 * size of equal part > 1
+		 * At the final key, pass duplicate groups to the tuple-type-specific
+		 * handler for work such as uniqueness checks or TID ordering.
 		 */
 		if (state->base.mkqsHandleDupFunc &&
 			(tupCount > 1))
@@ -706,9 +734,7 @@ mk_qsort_tuple_impl(SortTuple *x,
 		}
 	}
 
-	/* Recursively sort the greater part */
-
-	/* dist means the size of greater part */
+	/* Recursively sort the greater part at the same depth. */
 	dist = greaterEnd - greaterStart;
 	mk_qsort_tuple_impl(x + n - dist,
 						dist,
@@ -720,6 +746,9 @@ mk_qsort_tuple_impl(SortTuple *x,
 
 }
 
+/*
+ * Select tuple-representation callbacks once, outside the recursive hot path.
+ */
 static void
 mk_qsort_tuple(SortTuple *x,
 			   size_t n,
