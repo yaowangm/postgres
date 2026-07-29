@@ -604,6 +604,7 @@ tuplesort_begin_common(int workMem, SortCoordinate coordinate, int sortopt)
 
 	state->base.sortopt = sortopt;
 	state->base.tuples = true;
+	state->base.mkqsTupleType = MKQS_TUPLE_TYPE_UNSUPPORTED;
 	state->abbrevNext = 10;
 	state->mkqsUsed = false;
 

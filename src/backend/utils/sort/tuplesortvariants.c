@@ -425,7 +425,6 @@ tuplesort_begin_index_btree(Relation heapRel,
 	base->removeabbrev = removeabbrev_index;
 	base->comparetup = comparetup_index_btree;
 	base->comparetup_tiebreak = comparetup_index_btree_tiebreak;
-	base->mkqsTupleType = MKQS_TUPLE_TYPE_UNSUPPORTED;
 	base->mkqsHandleDupFunc = mkqs_handle_dup_index_btree;
 	base->writetup = writetup_index;
 	base->readtup = readtup_index;
