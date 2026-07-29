@@ -337,9 +337,6 @@ struct Tuplesortstate
 
 	/* Whether multi-key quick sort is used */
 	bool		mkqsUsed;
-
-	/* The complete top-level presorted check was performed and failed. */
-	bool		mkqsTopPresortFailed;
 };
 
 /*
@@ -609,7 +606,6 @@ tuplesort_begin_common(int workMem, SortCoordinate coordinate, int sortopt)
 	state->base.tuples = true;
 	state->abbrevNext = 10;
 	state->mkqsUsed = false;
-	state->mkqsTopPresortFailed = false;
 
 	/*
 	 * workMem is forced to be at least 64KB, the current minimum valid value
@@ -3080,18 +3076,6 @@ tuplesort_sort_memtuples(Tuplesortstate *state)
 						 sortKey->comparator == ssup_datum_signed_cmp)
 					use_radix = true;
 #endif
-			}
-
-			/*
-			 * Match qsort_tuple()'s full-key presorted check before entering
-			 * the generic mksort path.
-			 */
-			if (!use_radix)
-			{
-				if (mkqs_full_order_presorted(state->memtuples,
-											  state->memtupcount, state))
-					return;
-				state->mkqsTopPresortFailed = true;
 			}
 
 			if (state->memtupcount >= QSORT_THRESHOLD && use_radix)

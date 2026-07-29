@@ -465,38 +465,9 @@ mkqs_compare_tuple_range(SortTuple *a, SortTuple *b,
 }
 
 /*
- * Check whether the tuples are nondecreasing over the complete ordering.
- * Equality is safe because every depth that can affect the final order is
- * included.
+ * Check the complete ordering, including tuple-type-specific tiebreakers such
+ * as the implicit heap TID in a btree index tuple.
  */
-static bool
-mkqs_full_order_presorted_callbacks(SortTuple *x, size_t n,
-									Tuplesortstate *state,
-									MkqsCompareTuple compare_tuple)
-{
-	Assert(state->base.nKeys > 0);
-
-	for (size_t i = 1; i < n; i++)
-	{
-		CHECK_FOR_INTERRUPTS();
-		for (int depth = 0; depth < state->base.nKeys; depth++)
-		{
-			SortSupport sortKey = &state->base.sortKeys[depth];
-			int			compare;
-
-			compare = compare_tuple(x + i - 1, x + i, depth, state,
-									sortKey->comparator);
-			if (compare < 0)
-				break;
-			if (compare > 0)
-				return false;
-		}
-	}
-
-	return true;
-}
-
-/* Precheck used before the mksort tuple callbacks have been selected. */
 static bool
 mkqs_full_order_presorted(SortTuple *x, size_t n, Tuplesortstate *state)
 {
@@ -609,8 +580,6 @@ mk_qsort_tuple_impl(SortTuple *x,
 	if (depth == state->base.nKeys)
 		return;
 
-	state->mkqsUsed = true;
-
 	CHECK_FOR_INTERRUPTS();
 
 	/*
@@ -632,14 +601,7 @@ mk_qsort_tuple_impl(SortTuple *x,
 		return;
 	}
 
-	if (depth == 0)
-	{
-		/* The caller may already have performed and failed this exact scan. */
-		if (!state->mkqsTopPresortFailed &&
-			mkqs_full_order_presorted_callbacks(x, n, state, compare_tuple))
-			return;
-	}
-	else
+	if (depth > 0)
 	{
 		/* Check whether the current depth is already strictly increasing. */
 		if (mkqs_depth_strictly_increasing(x, n, depth, state,
@@ -747,7 +709,8 @@ mk_qsort_tuple_impl(SortTuple *x,
 }
 
 /*
- * Select tuple-representation callbacks once, outside the recursive hot path.
+ * Check the complete top-level order, then select tuple-representation
+ * callbacks once, outside the recursive hot path.
  */
 static void
 mk_qsort_tuple(SortTuple *x,
@@ -756,6 +719,11 @@ mk_qsort_tuple(SortTuple *x,
 			   Tuplesortstate *state,
 			   bool seenNull)
 {
+	if (depth == 0 && mkqs_full_order_presorted(x, n, state))
+		return;
+
+	state->mkqsUsed = true;
+
 	if (state->base.mkqsTupleType == MKQS_TUPLE_TYPE_HEAP)
 		mk_qsort_tuple_impl(x, n, depth, state, seenNull,
 							mkqs_compare_tuple_heap, mkqs_partition_heap);
