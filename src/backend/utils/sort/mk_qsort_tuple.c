@@ -32,23 +32,18 @@ typedef struct MkqsPartitionBounds
 } MkqsPartitionBounds;
 
 /*
- * compare_datum_typed compares two non-NULL datums in the sort operator's
- * natural direction.  mkqs_compare_datum() adds NULL and reverse-order
- * semantics around it.
- *
- * compare_tuple and partition are selected once for the tuple representation
- * at the mk_qsort_tuple() entry point.  The caller supplies the comparator for
- * the current sort key so that these callbacks need only specialize datum
- * extraction and tuple layout.
+ * compare_tuple and partition are selected at the start of each recursive
+ * level.  Heap tuples use direct integer comparators when the current sort key
+ * has a recognized, non-abbreviated comparator; all other keys use their
+ * generic SortSupport comparator.  Index tuples retain their representation-
+ * specific generic path.
  */
 typedef int (*MkqsCompareDatumTyped) (Datum datum1, Datum datum2,
 									  SortSupport sortKey);
 typedef int (*MkqsCompareTuple) (SortTuple *a, SortTuple *b, int depth,
-								 Tuplesortstate *state,
-								 MkqsCompareDatumTyped compare_datum_typed);
+								 Tuplesortstate *state);
 typedef bool (*MkqsPartition) (SortTuple *x, size_t n, int depth,
 							   Tuplesortstate *state,
-							   MkqsCompareDatumTyped compare_datum_typed,
 							   MkqsPartitionBounds *bounds);
 
 /* Swap two tuples in the sort tuple array. */
@@ -115,127 +110,166 @@ mkqs_get_index_datum(SortTuple *tuple, SortSupport sortKey,
 						 RelationGetDescr(arg->indexRel), isNull);
 }
 
-/* Apply NULL and direction semantics around one non-NULL datum comparator. */
+/* Compare two non-NULL full datums after an abbreviated-key collision. */
 static pg_attribute_always_inline int
-mkqs_compare_datum(Datum datum1, bool isNull1,
-				   Datum datum2, bool isNull2,
-				   SortSupport sortKey,
-				   MkqsCompareDatumTyped compare_datum_typed)
+mkqs_compare_abbrev_full_datum(Datum datum1, Datum datum2,
+							   SortSupport sortKey)
 {
 	int			compare;
 
-	if (isNull1 || isNull2)
-	{
-		if (isNull1 && isNull2)
-			return 0;
-		return isNull1 == sortKey->ssup_nulls_first ? -1 : 1;
-	}
-
-	compare = compare_datum_typed(datum1, datum2, sortKey);
+	compare = sortKey->abbrev_full_comparator(datum1, datum2, sortKey);
 	if (sortKey->ssup_reverse)
 		INVERT_COMPARE_RESULT(compare);
 	return compare;
 }
 
-/* Compare two heap SortTuples at exactly one sort-key depth. */
-static int
-mkqs_compare_tuple_heap(SortTuple *a, SortTuple *b, int depth,
-						Tuplesortstate *state,
-						MkqsCompareDatumTyped compare_datum_typed)
+/* Compare two non-NULL generic datums in the natural sort direction. */
+static pg_attribute_always_inline int
+mkqs_compare_datum_generic(Datum datum1, Datum datum2,
+						   SortSupport sortKey)
 {
-	SortSupport sortKey = &state->base.sortKeys[depth];
-	Datum		datum1;
-	Datum		datum2;
-	bool		isNull1;
-	bool		isNull2;
-	int			compare;
-
-	if (depth == 0)
-	{
-		/* datum1 caches the leading key, possibly in abbreviated form. */
-		compare = mkqs_compare_datum(a->datum1, a->isnull1,
-									 b->datum1, b->isnull1,
-									 sortKey, compare_datum_typed);
-		if (compare != 0 || !sortKey->abbrev_converter ||
-			a->isnull1 || b->isnull1)
-			return compare;
-
-		/* Equal abbreviations must be resolved using the full datums. */
-		datum1 = mkqs_get_heap_datum(a, sortKey, state, &isNull1);
-		datum2 = mkqs_get_heap_datum(b, sortKey, state, &isNull2);
-		Assert(!isNull1 && !isNull2);
-		return mkqs_compare_datum(datum1, false, datum2, false, sortKey,
-								  sortKey->abbrev_full_comparator);
-	}
-
-	datum1 = mkqs_get_heap_datum(a, sortKey, state, &isNull1);
-	datum2 = mkqs_get_heap_datum(b, sortKey, state, &isNull2);
-	return mkqs_compare_datum(datum1, isNull1, datum2, isNull2, sortKey,
-							  compare_datum_typed);
+	return sortKey->comparator(datum1, datum2, sortKey);
 }
 
-/* Compare two btree index SortTuples at exactly one sort-key depth. */
-static int
-mkqs_compare_tuple_index_btree(SortTuple *a, SortTuple *b, int depth,
-							   Tuplesortstate *state,
-							   MkqsCompareDatumTyped compare_datum_typed)
+/*
+ * Typed comparators keep the SortSupport argument to share one template
+ * interface with the generic comparator; the compiler removes the unused
+ * argument after inlining.
+ */
+
+#if SIZEOF_DATUM >= 8
+/* Compare two non-NULL signed 64-bit datums in the natural direction. */
+static pg_attribute_always_inline int
+mkqs_compare_datum_int64(Datum datum1, Datum datum2,
+						 SortSupport sortKey)
 {
-	SortSupport sortKey = &state->base.sortKeys[depth];
-	Datum		datum1;
-	Datum		datum2;
-	bool		isNull1;
-	bool		isNull2;
-	int			compare;
+	int64		value1;
+	int64		value2;
 
-	if (depth == 0)
-	{
-		/* datum1 caches the leading key, possibly in abbreviated form. */
-		compare = mkqs_compare_datum(a->datum1, a->isnull1,
-									 b->datum1, b->isnull1,
-									 sortKey, compare_datum_typed);
-		if (compare != 0 || !sortKey->abbrev_converter ||
-			a->isnull1 || b->isnull1)
-			return compare;
-
-		/* Equal abbreviations must be resolved using the full datums. */
-		datum1 = mkqs_get_index_datum(a, sortKey, state, &isNull1);
-		datum2 = mkqs_get_index_datum(b, sortKey, state, &isNull2);
-		Assert(!isNull1 && !isNull2);
-		return mkqs_compare_datum(datum1, false, datum2, false, sortKey,
-								  sortKey->abbrev_full_comparator);
-	}
-
-	datum1 = mkqs_get_index_datum(a, sortKey, state, &isNull1);
-	datum2 = mkqs_get_index_datum(b, sortKey, state, &isNull2);
-	return mkqs_compare_datum(datum1, isNull1, datum2, isNull2, sortKey,
-							  compare_datum_typed);
+	value1 = DatumGetInt64(datum1);
+	value2 = DatumGetInt64(datum2);
+	return value1 < value2 ? -1 : value1 > value2 ? 1 : 0;
 }
 
-#define MKQS_PARTITION mkqs_partition_heap
-#define MKQS_COMPARE_TO_PIVOT mkqs_compare_heap_to_pivot
+/* Compare two non-NULL unsigned 64-bit datums in the natural direction. */
+static pg_attribute_always_inline int
+mkqs_compare_datum_uint64(Datum datum1, Datum datum2,
+						  SortSupport sortKey)
+{
+	uint64		value1;
+	uint64		value2;
+
+	value1 = DatumGetUInt64(datum1);
+	value2 = DatumGetUInt64(datum2);
+	return value1 < value2 ? -1 : value1 > value2 ? 1 : 0;
+}
+#endif
+
+/* Compare two non-NULL signed 32-bit datums in the natural direction. */
+static pg_attribute_always_inline int
+mkqs_compare_datum_int32(Datum datum1, Datum datum2,
+						 SortSupport sortKey)
+{
+	int32		value1;
+	int32		value2;
+
+	value1 = DatumGetInt32(datum1);
+	value2 = DatumGetInt32(datum2);
+	return value1 < value2 ? -1 : value1 > value2 ? 1 : 0;
+}
+
+#define MKQS_BASE_NAME heap_generic
 #define MKQS_GET_DATUM mkqs_get_heap_datum
-#define MKQS_COMPARE_DATUM mkqs_compare_datum
-#include "mk_qsort_tuple_partition_template.h"
+#define MKQS_COMPARE_DATUM mkqs_compare_datum_generic
+#define MKQS_USE_ABBREVIATION 1
+#include "mk_qsort_tuple_template.h"
 
-#define MKQS_PARTITION mkqs_partition_index_btree
-#define MKQS_COMPARE_TO_PIVOT mkqs_compare_index_btree_to_pivot
+#if SIZEOF_DATUM >= 8
+#define MKQS_BASE_NAME heap_int64
+#define MKQS_GET_DATUM mkqs_get_heap_datum
+#define MKQS_COMPARE_DATUM mkqs_compare_datum_int64
+#define MKQS_USE_ABBREVIATION 0
+#include "mk_qsort_tuple_template.h"
+
+#define MKQS_BASE_NAME heap_uint64
+#define MKQS_GET_DATUM mkqs_get_heap_datum
+#define MKQS_COMPARE_DATUM mkqs_compare_datum_uint64
+#define MKQS_USE_ABBREVIATION 0
+#include "mk_qsort_tuple_template.h"
+#endif
+
+#define MKQS_BASE_NAME heap_int32
+#define MKQS_GET_DATUM mkqs_get_heap_datum
+#define MKQS_COMPARE_DATUM mkqs_compare_datum_int32
+#define MKQS_USE_ABBREVIATION 0
+#include "mk_qsort_tuple_template.h"
+
+#define MKQS_BASE_NAME index_btree
 #define MKQS_GET_DATUM mkqs_get_index_datum
-#define MKQS_COMPARE_DATUM mkqs_compare_datum
-#include "mk_qsort_tuple_partition_template.h"
+#define MKQS_COMPARE_DATUM mkqs_compare_datum_generic
+#define MKQS_USE_ABBREVIATION 1
+#include "mk_qsort_tuple_template.h"
+
+/* Select the generated operations for one tuple representation and depth. */
+static pg_attribute_always_inline void
+mkqs_select_compare_funcs(Tuplesortstate *state, int depth,
+						  MkqsCompareDatumTyped compare_datum_typed,
+						  MkqsCompareTuple *compare_tuple,
+						  MkqsPartition *partition)
+{
+	SortSupport sortKey = &state->base.sortKeys[depth];
+
+	if (state->base.mkqsTupleType == MKQS_TUPLE_TYPE_INDEX_BTREE)
+	{
+		*compare_tuple = mkqs_compare_tuple_index_btree;
+		*partition = mkqs_partition_index_btree;
+		return;
+	}
+
+	Assert(state->base.mkqsTupleType == MKQS_TUPLE_TYPE_HEAP);
+	*compare_tuple = mkqs_compare_tuple_heap_generic;
+	*partition = mkqs_partition_heap_generic;
+
+	/* Abbreviated leading datums require the generic fallback comparator. */
+	if (sortKey->abbrev_converter)
+		return;
+
+	if (compare_datum_typed == ssup_datum_int32_cmp)
+	{
+		*compare_tuple = mkqs_compare_tuple_heap_int32;
+		*partition = mkqs_partition_heap_int32;
+	}
+#if SIZEOF_DATUM >= 8
+	else if (compare_datum_typed == ssup_datum_signed_cmp)
+	{
+		*compare_tuple = mkqs_compare_tuple_heap_int64;
+		*partition = mkqs_partition_heap_int64;
+	}
+	else if (compare_datum_typed == ssup_datum_unsigned_cmp)
+	{
+		*compare_tuple = mkqs_compare_tuple_heap_uint64;
+		*partition = mkqs_partition_heap_uint64;
+	}
+#endif
+}
 
 /* Compare two tuples over the inclusive range of sort-key depths. */
 static pg_attribute_always_inline int
 mkqs_compare_tuple_range(SortTuple *a, SortTuple *b,
 						 int start_depth, int max_depth,
-						 Tuplesortstate *state,
-						 MkqsCompareTuple compare_tuple)
+						 Tuplesortstate *state)
 {
 	for (int depth = start_depth; depth <= max_depth; depth++)
 	{
 		SortSupport sortKey = &state->base.sortKeys[depth];
+		MkqsCompareDatumTyped compare_datum_typed = sortKey->comparator;
+		MkqsCompareTuple compare_tuple;
+		MkqsPartition partition;
 		int			compare;
 
-		compare = compare_tuple(a, b, depth, state, sortKey->comparator);
+		mkqs_select_compare_funcs(state, depth, compare_datum_typed,
+								  &compare_tuple, &partition);
+		compare = compare_tuple(a, b, depth, state);
 		if (compare != 0)
 			return compare;
 	}
@@ -272,16 +306,13 @@ mkqs_depth_strictly_increasing(SortTuple *x, size_t n, int depth,
 							   Tuplesortstate *state,
 							   MkqsCompareTuple compare_tuple)
 {
-	SortSupport sortKey = &state->base.sortKeys[depth];
-
 	Assert(depth >= 0);
 	Assert(depth < state->base.nKeys);
 
 	for (size_t i = 1; i < n; i++)
 	{
 		CHECK_FOR_INTERRUPTS();
-		if (compare_tuple(x + i - 1, x + i, depth, state,
-						  sortKey->comparator) >= 0)
+		if (compare_tuple(x + i - 1, x + i, depth, state) >= 0)
 			return false;
 	}
 
@@ -298,37 +329,26 @@ get_median_from_three(int a,
 					  Tuplesortstate *state,
 					  MkqsCompareTuple compare_tuple)
 {
-	SortSupport sortKey = &state->base.sortKeys[depth];
-	MkqsCompareDatumTyped compare_datum_typed = sortKey->comparator;
-
-	return compare_tuple(x + a, x + b, depth, state,
-						 compare_datum_typed) < 0 ?
-		(compare_tuple(x + b, x + c, depth, state,
-					   compare_datum_typed) < 0 ? b :
-		 (compare_tuple(x + a, x + c, depth, state,
-						compare_datum_typed) < 0 ? c : a)) :
-		(compare_tuple(x + b, x + c, depth, state,
-					   compare_datum_typed) > 0 ? b :
-		 (compare_tuple(x + a, x + c, depth, state,
-						compare_datum_typed) < 0 ? a : c));
+	return compare_tuple(x + a, x + b, depth, state) < 0 ?
+		(compare_tuple(x + b, x + c, depth, state) < 0 ? b :
+		 (compare_tuple(x + a, x + c, depth, state) < 0 ? c : a)) :
+		(compare_tuple(x + b, x + c, depth, state) > 0 ? b :
+		 (compare_tuple(x + a, x + c, depth, state) < 0 ? a : c));
 }
 
 /*
  * Recursively sort x at one key depth using three-way partitioning.
  *
- * compare_tuple and partition remain fixed for the tuple representation
- * throughout recursion.  Each comparison receives the current sort key's
- * typed comparator.  seenNull records whether any preceding equal key was
- * NULL, which the terminal duplicate handler needs for uniqueness checks.
+ * Select compare_tuple and partition for the current depth at each recursive
+ * entry.  seenNull records whether any preceding equal key was NULL, which
+ * the terminal duplicate handler needs for uniqueness checks.
  */
 static void
 mk_qsort_tuple_impl(SortTuple *x,
 					size_t n,
 					int depth,
 					Tuplesortstate *state,
-					bool seenNull,
-					MkqsCompareTuple compare_tuple,
-					MkqsPartition partition)
+					bool seenNull)
 {
 	/*
 	 * During partitioning, the four indexes delimit the ranges [0,
@@ -348,7 +368,10 @@ mk_qsort_tuple_impl(SortTuple *x,
 				d;
 	int32		dist;
 	bool		isDatumNull;
+	MkqsCompareDatumTyped compare_datum_typed;
+	MkqsCompareTuple compare_tuple;
 	MkqsPartitionBounds bounds;
+	MkqsPartition partition;
 
 	Assert(depth <= state->base.nKeys);
 	Assert(state->base.sortKeys);
@@ -358,6 +381,10 @@ mk_qsort_tuple_impl(SortTuple *x,
 	/* If we have reached the maximum depth, return immediately. */
 	if (depth == state->base.nKeys)
 		return;
+
+	compare_datum_typed = state->base.sortKeys[depth].comparator;
+	mkqs_select_compare_funcs(state, depth, compare_datum_typed,
+							  &compare_tuple, &partition);
 
 	CHECK_FOR_INTERRUPTS();
 
@@ -372,8 +399,8 @@ mk_qsort_tuple_impl(SortTuple *x,
 			for (l = m; l > 0; l--)
 			{
 				if (mkqs_compare_tuple_range(x + l - 1, x + l, depth,
-											 state->base.nKeys - 1, state,
-											 compare_tuple) <= 0)
+											 state->base.nKeys - 1,
+											 state) <= 0)
 					break;
 				mkqs_swap(l, l - 1, x);
 			}
@@ -406,8 +433,7 @@ mk_qsort_tuple_impl(SortTuple *x,
 									  compare_tuple);
 	mkqs_swap(0, lessStart, x);
 
-	isDatumNull = partition(x, n, depth, state,
-							state->base.sortKeys[depth].comparator, &bounds);
+	isDatumNull = partition(x, n, depth, state, &bounds);
 
 	lessStart = bounds.lessStart;
 	lessEnd = bounds.lessEnd;
@@ -438,9 +464,7 @@ mk_qsort_tuple_impl(SortTuple *x,
 						dist,
 						depth,
 						state,
-						seenNull,
-						compare_tuple,
-						partition);
+						seenNull);
 
 	/*
 	 * Recurse to the next depth for the equal part.  Since every tuple in
@@ -455,9 +479,7 @@ mk_qsort_tuple_impl(SortTuple *x,
 							tupCount,
 							depth + 1,
 							state,
-							seenNull || isDatumNull,
-							compare_tuple,
-							partition);
+							seenNull || isDatumNull);
 	}
 	else
 	{
@@ -481,15 +503,12 @@ mk_qsort_tuple_impl(SortTuple *x,
 						dist,
 						depth,
 						state,
-						seenNull,
-						compare_tuple,
-						partition);
+						seenNull);
 
 }
 
 /*
- * Check the complete top-level order, then select tuple-representation
- * callbacks once, outside the recursive hot path.
+ * Check the complete top-level order before entering recursive mksort.
  */
 static void
 mk_qsort_tuple(SortTuple *x,
@@ -502,15 +521,7 @@ mk_qsort_tuple(SortTuple *x,
 		return;
 
 	state->mkqsUsed = true;
-
-	if (state->base.mkqsTupleType == MKQS_TUPLE_TYPE_HEAP)
-		mk_qsort_tuple_impl(x, n, depth, state, seenNull,
-							mkqs_compare_tuple_heap, mkqs_partition_heap);
-	else
-	{
-		Assert(state->base.mkqsTupleType == MKQS_TUPLE_TYPE_INDEX_BTREE);
-		mk_qsort_tuple_impl(x, n, depth, state, seenNull,
-							mkqs_compare_tuple_index_btree,
-							mkqs_partition_index_btree);
-	}
+	Assert(state->base.mkqsTupleType == MKQS_TUPLE_TYPE_HEAP ||
+		   state->base.mkqsTupleType == MKQS_TUPLE_TYPE_INDEX_BTREE);
+	mk_qsort_tuple_impl(x, n, depth, state, seenNull);
 }
