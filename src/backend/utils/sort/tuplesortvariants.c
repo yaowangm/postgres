@@ -37,6 +37,7 @@
 #include "utils/tuplesort.h"
 #include "miscadmin.h"
 
+#include "tuplesort_private.h"
 
 /* sort-type codes for sort__start probes */
 #define HEAP_SORT		0
@@ -138,16 +139,6 @@ typedef struct
 	IndexInfo  *indexInfo;		/* info about index being used for reference */
 	EState	   *estate;			/* for evaluating index expressions */
 } TuplesortClusterArg;
-
-/*
- * Data structure pointed by "TuplesortPublic.arg" for the IndexTuple case.
- * Set by tuplesort_begin_index_xxx and used only by the IndexTuple routines.
- */
-typedef struct
-{
-	Relation	heapRel;		/* table the index is being built on */
-	Relation	indexRel;		/* index being built */
-} TuplesortIndexArg;
 
 /*
  * Data structure pointed by "TuplesortPublic.arg" for the index_btree subcase.
@@ -2092,30 +2083,6 @@ readtup_datum(Tuplesortstate *state, SortTuple *stup,
 
 	if (base->sortopt & TUPLESORT_RANDOMACCESS) /* need trailing length word? */
 		LogicalTapeReadExact(tape, &tuplen, sizeof(tuplen));
-}
-
-/*
- * Get one datum from a SortTuple containing a btree IndexTuple.
- *
- * Note the function does not check the leading sort key in datum1/isnull1;
- * callers handle that separately.
- */
-Datum
-mkqs_get_datum_index_btree(const SortTuple *tuple,
-						   int depth,
-						   Tuplesortstate *state,
-						   bool *isNull)
-{
-	TupleDesc	tupDesc;
-	TuplesortPublic *base = TuplesortstateGetPublic(state);
-	TuplesortIndexBTreeArg *arg = (TuplesortIndexBTreeArg *) base->arg;
-
-	Assert(tuple);
-	Assert(base->mkqsTupleType == MKQS_TUPLE_TYPE_INDEX_BTREE);
-
-	tupDesc = RelationGetDescr(arg->index.indexRel);
-	return index_getattr((IndexTuple) tuple->tuple, depth + 1,
-						 tupDesc, isNull);
 }
 
 /*
