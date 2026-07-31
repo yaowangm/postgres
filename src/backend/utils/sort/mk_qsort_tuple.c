@@ -212,11 +212,13 @@ mkqs_compare_tuple_index_btree(SortTuple *a, SortTuple *b, int depth,
 }
 
 #define MKQS_PARTITION mkqs_partition_heap
+#define MKQS_COMPARE_TO_PIVOT mkqs_compare_heap_to_pivot
 #define MKQS_GET_DATUM mkqs_get_heap_datum
 #define MKQS_COMPARE_DATUM mkqs_compare_datum
 #include "mk_qsort_tuple_partition_template.h"
 
 #define MKQS_PARTITION mkqs_partition_index_btree
+#define MKQS_COMPARE_TO_PIVOT mkqs_compare_index_btree_to_pivot
 #define MKQS_GET_DATUM mkqs_get_index_datum
 #define MKQS_COMPARE_DATUM mkqs_compare_datum
 #include "mk_qsort_tuple_partition_template.h"

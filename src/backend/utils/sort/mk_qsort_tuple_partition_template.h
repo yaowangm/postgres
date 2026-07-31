@@ -10,6 +10,9 @@
  * MKQS_PARTITION
  *	  Name of the partition function to generate.
  *
+ * MKQS_COMPARE_TO_PIVOT
+ *	  Name of the always-inline pivot comparison function to generate.
+ *
  * MKQS_GET_DATUM
  *	  Inline function that extracts the current sort key's datum from a
  *	  SortTuple.
@@ -24,44 +27,43 @@
  *-------------------------------------------------------------------------
  */
 
-#if !defined(MKQS_PARTITION) || !defined(MKQS_GET_DATUM) || \
+#if !defined(MKQS_PARTITION) || !defined(MKQS_COMPARE_TO_PIVOT) || \
+	!defined(MKQS_GET_DATUM) || \
 	!defined(MKQS_COMPARE_DATUM)
 #error "MKQS partition template parameters must be defined"
 #endif
 
-/*
- * Compare one tuple with the cached pivot.  This macro intentionally lives in
- * the template instead of generating another function: each instantiation can
- * inline its datum accessor directly into both partition scans.
- */
-#define MKQS_COMPARE_TO_PIVOT(tuple) \
-	do { \
-		SortTuple *candidate = (tuple); \
-		Datum		datum; \
-		bool		isNull; \
-		\
-		if (depth == 0) \
-		{ \
-			dist = MKQS_COMPARE_DATUM(candidate->datum1, candidate->isnull1, \
-									  pivotDatum, pivotIsNull, sortKey, \
-									  compare_datum_typed); \
-			if (dist == 0 && sortKey->abbrev_converter && \
-				!candidate->isnull1 && !pivotIsNull) \
-			{ \
-				datum = MKQS_GET_DATUM(candidate, sortKey, state, &isNull); \
-				Assert(!isNull); \
-				dist = MKQS_COMPARE_DATUM(datum, false, pivotFullDatum, false, \
-									  sortKey, \
-									  sortKey->abbrev_full_comparator); \
-			} \
-		} \
-		else \
-		{ \
-			datum = MKQS_GET_DATUM(candidate, sortKey, state, &isNull); \
-			dist = MKQS_COMPARE_DATUM(datum, isNull, pivotDatum, pivotIsNull, \
-									  sortKey, compare_datum_typed); \
-		} \
-	} while (0)
+/* Compare one tuple with the cached pivot using the specialized accessor. */
+static pg_attribute_always_inline int
+MKQS_COMPARE_TO_PIVOT(SortTuple *tuple, int depth,
+					  Tuplesortstate *state, SortSupport sortKey,
+					  MkqsCompareDatumTyped compare_datum_typed,
+					  Datum pivotDatum, bool pivotIsNull,
+					  Datum pivotFullDatum)
+{
+	Datum		datum;
+	bool		isNull;
+	int			compare;
+
+	if (depth == 0)
+	{
+		compare = MKQS_COMPARE_DATUM(tuple->datum1, tuple->isnull1,
+									 pivotDatum, pivotIsNull, sortKey,
+									 compare_datum_typed);
+		if (compare != 0 || !sortKey->abbrev_converter ||
+			tuple->isnull1 || pivotIsNull)
+			return compare;
+
+		datum = MKQS_GET_DATUM(tuple, sortKey, state, &isNull);
+		Assert(!isNull);
+		return MKQS_COMPARE_DATUM(datum, false, pivotFullDatum, false,
+								  sortKey, sortKey->abbrev_full_comparator);
+	}
+
+	datum = MKQS_GET_DATUM(tuple, sortKey, state, &isNull);
+	return MKQS_COMPARE_DATUM(datum, isNull, pivotDatum, pivotIsNull,
+							  sortKey, compare_datum_typed);
+}
 
 /* Partition tuples around x[0], comparing only the current key depth. */
 static bool
@@ -104,7 +106,9 @@ MKQS_PARTITION(SortTuple *x, size_t n, int depth,
 		/* Scan from the left, moving equal values to the left edge. */
 		while (bounds->lessEnd <= bounds->greaterStart)
 		{
-			MKQS_COMPARE_TO_PIVOT(x + bounds->lessEnd);
+			dist = MKQS_COMPARE_TO_PIVOT(x + bounds->lessEnd, depth,
+										 state, sortKey, compare_datum_typed,
+										 pivotDatum, pivotIsNull, pivotFullDatum);
 			if (dist > 0)
 				break;
 			if (dist == 0)
@@ -118,7 +122,9 @@ MKQS_PARTITION(SortTuple *x, size_t n, int depth,
 		/* Scan from the right, moving equal values to the right edge. */
 		while (bounds->lessEnd <= bounds->greaterStart)
 		{
-			MKQS_COMPARE_TO_PIVOT(x + bounds->greaterStart);
+			dist = MKQS_COMPARE_TO_PIVOT(x + bounds->greaterStart, depth,
+										 state, sortKey, compare_datum_typed,
+										 pivotDatum, pivotIsNull, pivotFullDatum);
 			if (dist < 0)
 				break;
 			if (dist == 0)
