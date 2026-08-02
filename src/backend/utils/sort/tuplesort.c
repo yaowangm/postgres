@@ -3052,11 +3052,13 @@ tuplesort_sort_memtuples(Tuplesortstate *state)
 		 *
 		 * A summary of tuple types supported by mk qsort:
 		 *
-		 * HeapTuple: supported IndexTuple(btree): supported for non-unique
-		 * builds IndexTuple(hash): not supported because there is only one
+		 * HeapTuple: supported
+		 * IndexTuple(btree): supported for non-unique builds
+		 * IndexTuple(hash): not supported because there is only one
 		 * key DatumTuple: not supported because there is only one key
-		 * HeapTuple(for cluster): not supported yet IndexTuple(gist): not
-		 * supported yet IndexTuple(brin): not supported yet
+		 * HeapTuple(for cluster): not supported yet
+		 * IndexTuple(gist): not supported yet
+		 * IndexTuple(brin): not supported yet
 		 */
 		if (enable_mk_sort &&
 			state->base.nKeys > 1 &&

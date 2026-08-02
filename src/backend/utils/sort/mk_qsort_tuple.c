@@ -38,8 +38,6 @@ typedef struct MkqsPartitionBounds
  * generic SortSupport comparator.  Index tuples retain their representation-
  * specific generic path.
  */
-typedef int (*MkqsCompareDatumTyped) (Datum datum1, Datum datum2,
-									  SortSupport sortKey);
 typedef int (*MkqsCompareTuple) (SortTuple *a, SortTuple *b, int depth,
 								 Tuplesortstate *state);
 typedef bool (*MkqsPartition) (SortTuple *x, size_t n, int depth,
@@ -213,7 +211,6 @@ mkqs_compare_datum_int32(Datum datum1, Datum datum2,
 /* Select the generated operations for one tuple representation and depth. */
 static pg_attribute_always_inline void
 mkqs_select_compare_funcs(Tuplesortstate *state, int depth,
-						  MkqsCompareDatumTyped compare_datum_typed,
 						  MkqsCompareTuple *compare_tuple,
 						  MkqsPartition *partition)
 {
@@ -234,18 +231,18 @@ mkqs_select_compare_funcs(Tuplesortstate *state, int depth,
 	if (sortKey->abbrev_converter)
 		return;
 
-	if (compare_datum_typed == ssup_datum_int32_cmp)
+	if (sortKey->comparator == ssup_datum_int32_cmp)
 	{
 		*compare_tuple = mkqs_compare_tuple_heap_int32;
 		*partition = mkqs_partition_heap_int32;
 	}
 #if SIZEOF_DATUM >= 8
-	else if (compare_datum_typed == ssup_datum_signed_cmp)
+	else if (sortKey->comparator == ssup_datum_signed_cmp)
 	{
 		*compare_tuple = mkqs_compare_tuple_heap_int64;
 		*partition = mkqs_partition_heap_int64;
 	}
-	else if (compare_datum_typed == ssup_datum_unsigned_cmp)
+	else if (sortKey->comparator == ssup_datum_unsigned_cmp)
 	{
 		*compare_tuple = mkqs_compare_tuple_heap_uint64;
 		*partition = mkqs_partition_heap_uint64;
@@ -261,14 +258,11 @@ mkqs_compare_tuple_range(SortTuple *a, SortTuple *b,
 {
 	for (int depth = start_depth; depth <= max_depth; depth++)
 	{
-		SortSupport sortKey = &state->base.sortKeys[depth];
-		MkqsCompareDatumTyped compare_datum_typed = sortKey->comparator;
 		MkqsCompareTuple compare_tuple;
 		MkqsPartition partition;
 		int			compare;
 
-		mkqs_select_compare_funcs(state, depth, compare_datum_typed,
-								  &compare_tuple, &partition);
+		mkqs_select_compare_funcs(state, depth, &compare_tuple, &partition);
 		compare = compare_tuple(a, b, depth, state);
 		if (compare != 0)
 			return compare;
@@ -318,7 +312,7 @@ mkqs_depth_strictly_increasing(SortTuple *x, size_t n, int depth,
 	return true;
 }
 
-/* Return the array index of the median tuple at the current depth. */
+/* Return the index of the median of x[a], x[b], and x[c] at this depth. */
 static pg_noinline int
 get_median_from_three(int a,
 					  int b,
@@ -367,7 +361,6 @@ mk_qsort_tuple_impl(SortTuple *x,
 				d;
 	int32		dist;
 	bool		isDatumNull;
-	MkqsCompareDatumTyped compare_datum_typed;
 	MkqsCompareTuple compare_tuple;
 	MkqsPartitionBounds bounds;
 	MkqsPartition partition;
@@ -381,9 +374,7 @@ mk_qsort_tuple_impl(SortTuple *x,
 	if (depth == state->base.nKeys)
 		return;
 
-	compare_datum_typed = state->base.sortKeys[depth].comparator;
-	mkqs_select_compare_funcs(state, depth, compare_datum_typed,
-							  &compare_tuple, &partition);
+	mkqs_select_compare_funcs(state, depth, &compare_tuple, &partition);
 
 	CHECK_FOR_INTERRUPTS();
 

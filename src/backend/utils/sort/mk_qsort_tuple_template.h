@@ -33,7 +33,10 @@
 #error "MKQS template parameters must be defined"
 #endif
 
-/* Derive all generated function names from the caller-supplied base name. */
+/*
+ * Derive all generated function names from the caller-supplied base name.
+ * The extra indirection expands MKQS_BASE_NAME before token concatenation.
+ */
 #define MKQS_MAKE_NAME_(prefix, suffix) prefix##suffix
 #define MKQS_MAKE_NAME(prefix, suffix) MKQS_MAKE_NAME_(prefix, suffix)
 #define MKQS_COMPARE_TUPLE \
