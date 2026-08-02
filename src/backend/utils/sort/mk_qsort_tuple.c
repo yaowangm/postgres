@@ -277,19 +277,18 @@ mkqs_compare_tuple_range(SortTuple *a, SortTuple *b,
 	return 0;
 }
 
-/*
- * Check the complete ordering, including tuple-type-specific tiebreakers such
- * as the implicit heap TID in a btree index tuple.
- */
+/* Check the ordering covered by the caller-supplied full comparator. */
 static bool
-mkqs_full_order_presorted(SortTuple *x, size_t n, Tuplesortstate *state)
+mkqs_full_order_presorted(SortTuple *x, size_t n, Tuplesortstate *state,
+						  SortTupleComparator compare)
 {
 	Assert(state->base.nKeys > 0);
+	Assert(compare);
 
 	for (size_t i = 1; i < n; i++)
 	{
 		CHECK_FOR_INTERRUPTS();
-		if (COMPARETUP(state, x + i - 1, x + i) > 0)
+		if (compare(x + i - 1, x + i, state) > 0)
 			return false;
 	}
 
@@ -508,7 +507,16 @@ mk_qsort_tuple_impl(SortTuple *x,
 }
 
 /*
- * Check the complete top-level order before entering recursive mksort.
+ * Check the complete remaining order before entering recursive mksort.
+ * Direct mksort enters at depth 0 and needs the ordinary comparator.  Radix
+ * sort enters at depth 1 after grouping equal leading keys, so its tiebreak
+ * comparator covers the complete remaining order.
+ *
+ * The latter check matters for btree builds where every explicit key in a
+ * radix group is equal but the heap TIDs are already ordered.  Standard
+ * qsort's presort check returns after one scan in that case.  Without the
+ * same check here, mksort partitions the group once per remaining equal key
+ * and then invokes another qsort for the TIDs.
  */
 static void
 mk_qsort_tuple(SortTuple *x,
@@ -517,7 +525,13 @@ mk_qsort_tuple(SortTuple *x,
 			   Tuplesortstate *state,
 			   bool seenNull)
 {
-	if (depth == 0 && mkqs_full_order_presorted(x, n, state))
+	SortTupleComparator compare;
+
+	Assert(depth == 0 || depth == 1);
+	compare = depth == 0 ? state->base.comparetup :
+		state->base.comparetup_tiebreak;
+
+	if (mkqs_full_order_presorted(x, n, state, compare))
 		return;
 
 	state->mkqsUsed = true;
