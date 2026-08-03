@@ -605,6 +605,7 @@ tuplesort_begin_common(int workMem, SortCoordinate coordinate, int sortopt)
 	state->base.sortopt = sortopt;
 	state->base.tuples = true;
 	state->base.mkqsTupleType = MKQS_TUPLE_TYPE_UNSUPPORTED;
+	state->base.mkqsIndexTupDesc = NULL;
 	state->abbrevNext = 10;
 	state->mkqsUsed = false;
 
@@ -2641,6 +2642,12 @@ normalize_datum(Datum orig, SortSupport ssup)
  * Radix sort by (pass-by-value) datum1, diverting to qsort_tuple()
  * for tiebreaks.
  *
+ * When use_mksort_tiebreak is true, radix sort is the leading-key phase of
+ * mksort.  Groups equal in datum1 are then passed to mk_qsort_tuple() at
+ * depth 1 when large enough; otherwise, and whenever the flag is false,
+ * qsort_tuple() uses the standard tiebreak comparator.  Recursive calls
+ * propagate the flag until all bytes of datum1 have been processed.
+ *
  * This is a modification of ska_byte_sort() from
  * https://github.com/skarupke/ska_sort
  * The original copyright notice follows:
@@ -2869,6 +2876,11 @@ radix_sort_recursive(SortTuple *begin, size_t n_elems, int level,
  *
  * Partition tuples by isnull1, then sort both partitions, using
  * radix sort on the NOT NULL partition if it's large enough.
+ *
+ * use_mksort_tiebreak is true when the caller selected radix sort for the
+ * first key before continuing with mksort at depth 1.  In that mode, both
+ * the NULL partition and sufficiently large equal-datum1 groups use mksort
+ * for the remaining keys.  When false, both use the standard tiebreak sort.
  */
 static void
 radix_sort_tuple(SortTuple *data, size_t n, Tuplesortstate *state,

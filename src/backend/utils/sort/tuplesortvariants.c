@@ -37,8 +37,6 @@
 #include "utils/tuplesort.h"
 #include "miscadmin.h"
 
-#include "tuplesort_private.h"
-
 /* sort-type codes for sort__start probes */
 #define HEAP_SORT		0
 #define INDEX_SORT		1
@@ -139,6 +137,16 @@ typedef struct
 	IndexInfo  *indexInfo;		/* info about index being used for reference */
 	EState	   *estate;			/* for evaluating index expressions */
 } TuplesortClusterArg;
+
+/*
+ * Data structure pointed by "TuplesortPublic.arg" for the IndexTuple case.
+ * Set by tuplesort_begin_index_xxx and used only by the IndexTuple routines.
+ */
+typedef struct
+{
+	Relation	heapRel;		/* table the index is being built on */
+	Relation	indexRel;		/* index being built */
+} TuplesortIndexArg;
 
 /*
  * Data structure pointed by "TuplesortPublic.arg" for the index_btree subcase.
@@ -427,7 +435,10 @@ tuplesort_begin_index_btree(Relation heapRel,
 	 * handling stays unchanged.
 	 */
 	if (base->nKeys > 1 && !enforceUnique)
+	{
 		base->mkqsTupleType = MKQS_TUPLE_TYPE_INDEX_BTREE;
+		base->mkqsIndexTupDesc = RelationGetDescr(indexRel);
+	}
 
 	arg->index.heapRel = heapRel;
 	arg->index.indexRel = indexRel;

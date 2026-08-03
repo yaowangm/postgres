@@ -20,8 +20,6 @@
  * replacement of qsort_tuple() when specific conditions are satisfied.
  */
 
-#include "tuplesort_private.h"
-
 /* Boundaries of the equal, lesser, unprocessed, and greater partitions. */
 typedef struct MkqsPartitionBounds
 {
@@ -98,14 +96,14 @@ static pg_attribute_always_inline Datum
 mkqs_get_index_datum(SortTuple *tuple, SortSupport sortKey,
 					 Tuplesortstate *state, bool *isNull)
 {
-	TuplesortIndexArg *arg = (TuplesortIndexArg *) state->base.arg;
 	int			depth = sortKey - state->base.sortKeys;
 
 	Assert(tuple);
 	Assert(state->base.mkqsTupleType == MKQS_TUPLE_TYPE_INDEX_BTREE);
+	Assert(state->base.mkqsIndexTupDesc != NULL);
 
 	return index_getattr((IndexTuple) tuple->tuple, depth + 1,
-						 RelationGetDescr(arg->indexRel), isNull);
+						 state->base.mkqsIndexTupDesc, isNull);
 }
 
 /* Compare two non-NULL full datums after an abbreviated-key collision. */
