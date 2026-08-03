@@ -33,19 +33,17 @@
 #error "MKQS template parameters must be defined"
 #endif
 
-/*
- * Derive all generated function names from the caller-supplied base name.
- * The extra indirection expands MKQS_BASE_NAME before token concatenation.
- */
-#define MKQS_MAKE_NAME_(prefix, suffix) prefix##suffix
-#define MKQS_MAKE_NAME(prefix, suffix) MKQS_MAKE_NAME_(prefix, suffix)
+/* Derive all generated function names from the caller-supplied base name. */
+#define MKQS_MAKE_PREFIX(a) CppConcat(a,_)
+#define MKQS_MAKE_NAME(a,b) MKQS_MAKE_NAME_(MKQS_MAKE_PREFIX(a),b)
+#define MKQS_MAKE_NAME_(a,b) CppConcat(a,b)
 #define MKQS_COMPARE_TUPLE \
-	MKQS_MAKE_NAME(mkqs_compare_tuple_, MKQS_BASE_NAME)
-#define MKQS_PARTITION MKQS_MAKE_NAME(mkqs_partition_, MKQS_BASE_NAME)
+	MKQS_MAKE_NAME(mkqs_compare_tuple, MKQS_BASE_NAME)
+#define MKQS_PARTITION MKQS_MAKE_NAME(mkqs_partition, MKQS_BASE_NAME)
 #define MKQS_COMPARE_TO_PIVOT \
-	MKQS_MAKE_NAME(mkqs_compare_to_pivot_, MKQS_BASE_NAME)
+	MKQS_MAKE_NAME(mkqs_compare_to_pivot, MKQS_BASE_NAME)
 #define MKQS_APPLY_COMPARE \
-	MKQS_MAKE_NAME(mkqs_apply_compare_, MKQS_BASE_NAME)
+	MKQS_MAKE_NAME(mkqs_apply_compare, MKQS_BASE_NAME)
 
 /* Apply common NULL and sort-direction semantics around a typed comparison. */
 static pg_attribute_always_inline int
@@ -226,3 +224,4 @@ MKQS_PARTITION(SortTuple *x, size_t n, int depth,
 #undef MKQS_BASE_NAME
 #undef MKQS_MAKE_NAME
 #undef MKQS_MAKE_NAME_
+#undef MKQS_MAKE_PREFIX
