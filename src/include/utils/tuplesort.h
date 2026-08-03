@@ -239,7 +239,6 @@ typedef struct
 	 * Tuple representation supported by mk_qsort_tuple().
 	 */
 	MkqsTupleType mkqsTupleType;
-	TupleDesc	mkqsIndexTupDesc; /* cached descriptor for btree IndexTuples */
 
 	/*
 	 * Function pointer, referencing a function to handle duplicated tuple
