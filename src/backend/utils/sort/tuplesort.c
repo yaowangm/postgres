@@ -3056,10 +3056,13 @@ tuplesort_sort_memtuples(Tuplesortstate *state)
 	if (state->memtupcount > 1)
 	{
 		/*
-		 * Apply multi-key quick sort when: 1. enable_mk_sort is set 2. There
-		 * are multiple keys available 3. mkqsTupleType identifies a tuple
-		 * type supported by mk qsort. Currently heap tuples and non-unique
-		 * btree index tuples are supported.
+		 * Apply multi-key quick sort when:
+		 * 1. enable_mk_sort is set
+		 * 2. There are multiple keys available
+		 * 3. mkqsTupleType identifies a tuple type supported by mk qsort.
+		 *
+		 * Currently heap tuples and non-unique btree index tuples are
+		 * supported.
 		 *
 		 * A summary of tuple types supported by mk qsort:
 		 *

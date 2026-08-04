@@ -3,8 +3,6 @@
  * tuplesortvariants.h
  *	  Private declarations shared by tuplesort implementation files.
  *
- * Copyright (c) 2026, PostgreSQL Global Development Group
- *
  * IDENTIFICATION
  *	  src/backend/utils/sort/tuplesortvariants.h
  *
