@@ -835,9 +835,25 @@ tuplesort_free(Tuplesortstate *state)
 			elog(LOG, "%s of worker %d ended, %" PRId64 " disk blocks used: %s",
 				 SERIAL(state) ? "external sort" : "parallel external sort",
 				 state->worker, spaceUsed, pg_rusage_show(&state->ru_start));
+		else if (SERIAL(state))
+		{
+			TuplesortMethod method;
+
+			if (state->boundUsed)
+				method = SORT_TYPE_TOP_N_HEAPSORT;
+			else if (state->mkqsUsed)
+				method = SORT_TYPE_MK_QSORT;
+			else
+				method = SORT_TYPE_QUICKSORT;
+
+			elog(LOG, "internal sort of worker %d ended, method: %s, "
+				 "%" PRId64 " KB used: %s",
+				 state->worker, tuplesort_method_name(method), spaceUsed,
+				 pg_rusage_show(&state->ru_start));
+		}
 		else
-			elog(LOG, "%s of worker %d ended, %" PRId64 " KB used: %s",
-				 SERIAL(state) ? "internal sort" : "unperformed parallel sort",
+			elog(LOG, "unperformed parallel sort of worker %d ended, "
+				 "%" PRId64 " KB used: %s",
 				 state->worker, spaceUsed, pg_rusage_show(&state->ru_start));
 	}
 
