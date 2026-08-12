@@ -111,7 +111,6 @@ static void freestate_cluster(Tuplesortstate *state);
 static void
 			mkqs_handle_dup_index_btree(SortTuple *x,
 										const int tupleCount,
-										const bool seenNull,
 										Tuplesortstate *state);
 
 static int
@@ -2086,29 +2085,17 @@ readtup_datum(Tuplesortstate *state, SortTuple *stup,
 		LogicalTapeReadExact(tape, &tuplen, sizeof(tuplen));
 }
 
-/*
- * Handle duplicated SortTuples (IndexTuple for btree index during mk qsort)
- *  x: the duplicated tuple list
- *  tupleCount: count of the tuples
- */
+/* Sort an equal-key btree group by its heap TID tiebreak. */
 static void
 mkqs_handle_dup_index_btree(SortTuple *x,
 							const int tupleCount,
-							const bool seenNull,
 							Tuplesortstate *state)
 {
 	TuplesortPublic *base = TuplesortstateGetPublic(state);
 	TuplesortIndexBTreeArg *arg = (TuplesortIndexBTreeArg *) base->arg;
 
-	/* If enforceUnique is enabled and we never saw NULL, raise error */
-	if (arg->enforceUnique && !(!arg->uniqueNullsNotDistinct && seenNull))
-	{
-		/*
-		 * x means the first tuple of duplicated tuple list Since they are
-		 * duplicated, simply pick up the first one to raise error
-		 */
-		raise_error_of_dup_index((IndexTuple) (x->tuple), state);
-	}
+	/* Unique btree builds are not eligible for mksort. */
+	Assert(!arg->enforceUnique);
 
 	/*
 	 * If key values are equal, we sort on ItemPointer.  This is required for

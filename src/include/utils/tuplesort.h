@@ -137,7 +137,6 @@ typedef int (*SortTupleComparator) (const SortTuple *a, const SortTuple *b,
 typedef void
 			(*MkqsHandleDupFunc) (SortTuple *x,
 								  const int tupleCount,
-								  const bool seenNull,
 								  Tuplesortstate *state);
 
 /*
@@ -241,9 +240,8 @@ typedef struct
 	MkqsTupleType mkqsTupleType;
 
 	/*
-	 * Function pointer, referencing a function to handle duplicated tuple
-	 * from SortTuple list with multi-key. Used by mk_qsort_tuple(). For now,
-	 * the function pointer is filled for only btree index tuple.
+	 * Finish a group equal on all explicit mksort keys.  Currently only btree
+	 * index tuples use this callback, to apply the heap TID tiebreak.
 	 */
 	MkqsHandleDupFunc mkqsHandleDupFunc;
 } TuplesortPublic;

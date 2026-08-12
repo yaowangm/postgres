@@ -40,7 +40,7 @@ typedef struct MkqsPartitionBounds
  */
 typedef int (*MkqsCompareTuple) (SortTuple *a, SortTuple *b, int depth,
 								 Tuplesortstate *state);
-typedef bool (*MkqsPartition) (SortTuple *x, size_t n, int depth,
+typedef void (*MkqsPartition) (SortTuple *x, size_t n, int depth,
 							   Tuplesortstate *state,
 							   MkqsPartitionBounds *bounds);
 
@@ -359,15 +359,13 @@ get_median_from_three(int a,
  * Recursively sort x at one key depth using three-way partitioning.
  *
  * Select compare_tuple and partition for the current depth at each recursive
- * entry.  seenNull records whether any preceding equal key was NULL, which
- * the terminal duplicate handler needs for uniqueness checks.
+ * entry.
  */
 static void
 mk_qsort_tuple_impl(SortTuple *x,
 					size_t n,
 					int depth,
-					Tuplesortstate *state,
-					bool seenNull)
+					Tuplesortstate *state)
 {
 	/*
 	 * During partitioning, the four indexes delimit the ranges [0,
@@ -386,7 +384,6 @@ mk_qsort_tuple_impl(SortTuple *x,
 				r,
 				d;
 	int32		dist;
-	bool		isDatumNull;
 	MkqsCompareTuple compare_tuple;
 	MkqsPartitionBounds bounds;
 	MkqsPartition partition;
@@ -452,7 +449,7 @@ mk_qsort_tuple_impl(SortTuple *x,
 									  compare_tuple);
 	mkqs_swap(0, lessStart, x);
 
-	isDatumNull = partition(x, n, depth, state, &bounds);
+	partition(x, n, depth, state, &bounds);
 
 	lessStart = bounds.lessStart;
 	lessEnd = bounds.lessEnd;
@@ -482,14 +479,9 @@ mk_qsort_tuple_impl(SortTuple *x,
 	mk_qsort_tuple_impl(x,
 						dist,
 						depth,
-						state,
-						seenNull);
+						state);
 
-	/*
-	 * Recurse to the next depth for the equal part.  Since every tuple in
-	 * this part has the same current datum, the pivot's NULL flag represents
-	 * the whole part.
-	 */
+	/* Recurse to the next depth for the equal part. */
 	tupCount = lessStart + n - greaterEnd - 1;
 
 	if (depth < state->base.nKeys - 1)
@@ -497,21 +489,19 @@ mk_qsort_tuple_impl(SortTuple *x,
 		mk_qsort_tuple_impl(x + dist,
 							tupCount,
 							depth + 1,
-							state,
-							seenNull || isDatumNull);
+							state);
 	}
 	else
 	{
 		/*
 		 * At the final key, pass duplicate groups to the tuple-type-specific
-		 * handler for work such as uniqueness checks or TID ordering.
+		 * handler for final ordering such as the btree heap TID tiebreak.
 		 */
 		if (state->base.mkqsHandleDupFunc &&
 			(tupCount > 1))
 		{
 			state->base.mkqsHandleDupFunc(x + dist,
 										  tupCount,
-										  seenNull || isDatumNull,
 										  state);
 		}
 	}
@@ -521,8 +511,7 @@ mk_qsort_tuple_impl(SortTuple *x,
 	mk_qsort_tuple_impl(x + n - dist,
 						dist,
 						depth,
-						state,
-						seenNull);
+						state);
 
 }
 
@@ -542,8 +531,7 @@ static void
 mk_qsort_tuple(SortTuple *x,
 			   size_t n,
 			   int depth,
-			   Tuplesortstate *state,
-			   bool seenNull)
+			   Tuplesortstate *state)
 {
 	SortTupleComparator compare;
 
@@ -557,5 +545,5 @@ mk_qsort_tuple(SortTuple *x,
 	state->mkqsUsed = true;
 	Assert(state->base.mkqsTupleType == MKQS_TUPLE_TYPE_HEAP ||
 		   state->base.mkqsTupleType == MKQS_TUPLE_TYPE_INDEX_BTREE);
-	mk_qsort_tuple_impl(x, n, depth, state, seenNull);
+	mk_qsort_tuple_impl(x, n, depth, state);
 }

@@ -163,11 +163,8 @@ MKQS_COMPARE_TO_PIVOT(SortTuple *tuple, int depth,
 	return MKQS_APPLY_COMPARE(datum, isNull, pivotDatum, pivotIsNull, sortKey);
 }
 
-/*
- * Partition tuples around x[0], comparing only the current key depth.
- * Return true if the pivot datum is NULL, and false otherwise.
- */
-static bool
+/* Partition tuples around x[0], comparing only the current key depth. */
+static void
 MKQS_PARTITION(SortTuple *x, size_t n, int depth,
 			   Tuplesortstate *state,
 			   MkqsPartitionBounds *bounds)
@@ -238,7 +235,7 @@ MKQS_PARTITION(SortTuple *x, size_t n, int depth,
 		}
 
 		if (bounds->lessEnd > bounds->greaterStart)
-			return pivotIsNull;
+			return;
 		mkqs_swap(bounds->lessEnd, bounds->greaterStart, x);
 		bounds->lessEnd++;
 		bounds->greaterStart--;

@@ -2869,8 +2869,7 @@ radix_sort_recursive(SortTuple *begin, size_t n_elems, int level,
 					mk_qsort_tuple(partition_begin,
 								   num_elements,
 								   1,
-								   state,
-								   false);
+								   state);
 				}
 				else
 					qsort_tuple(partition_begin,
@@ -3003,8 +3002,7 @@ radix_sort_tuple(SortTuple *data, size_t n, Tuplesortstate *state,
 			mk_qsort_tuple(null_start,
 						   null_count,
 						   1,
-						   state,
-						   true);
+						   state);
 		}
 		else
 			qsort_tuple(null_start,
@@ -3131,8 +3129,7 @@ tuplesort_sort_memtuples(Tuplesortstate *state)
 				mk_qsort_tuple(state->memtuples,
 							   state->memtupcount,
 							   0,
-							   state,
-							   false);
+							   state);
 			}
 			verify_memtuples_sorted(state);
 
