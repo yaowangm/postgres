@@ -529,12 +529,11 @@ typedef struct RadixSortInfo
 #define QSORT_THRESHOLD 40
 
 /*
- * After radix sorting the first key for mksort, finish smaller tie groups
- * with the standard tiebreak comparator.
+ * Below this size mk_qsort_tuple() uses insertion sort.  After radix sorting
+ * the first key, finish smaller tie groups with the standard comparator,
+ * since handing them to mksort would immediately select its insertion-sort
+ * base case.
  */
-#define MKQS_RADIX_TIEBREAK_THRESHOLD 64
-
-/* Threshold below which mk_qsort_tuple() uses insertion sort. */
 #define MKQS_INSERTION_SORT_THRESHOLD 16
 
 #include "mk_qsort_tuple.c"
@@ -2865,7 +2864,7 @@ radix_sort_recursive(SortTuple *begin, size_t n_elems, int level,
 				 * comparator.
 				 */
 				if (use_mksort_tiebreak &&
-					num_elements >= MKQS_RADIX_TIEBREAK_THRESHOLD)
+					num_elements >= MKQS_INSERTION_SORT_THRESHOLD)
 				{
 					mk_qsort_tuple(partition_begin,
 								   num_elements,
@@ -2986,11 +2985,20 @@ radix_sort_tuple(SortTuple *data, size_t n, Tuplesortstate *state,
 		Assert(st->isnull1 == false);
 
 	/*
-	 * Sort the NULL partition using tiebreak comparator, if necessary.
+	 * Sort the NULL partition using the tiebreak comparator, if necessary.
+	 *
+	 * Unlike a non-NULL first-key tie group, this partition does not pass
+	 * through radix_sort_recursive(), so it cannot use that function's final
+	 * radix-to-mksort handoff check.  Apply the same cutoff here explicitly.
+	 * Passing a smaller group to mk_qsort_tuple() would only make it enter its
+	 * insertion-sort base case immediately; calling qsort_tuple() directly is
+	 * cheaper for those groups.  At and above the cutoff, mksort can partition
+	 * the equal leading keys and sort later keys efficiently.
 	 */
 	if (state->base.onlyKey == NULL && null_count > 1)
 	{
-		if (use_mksort_tiebreak)
+		if (use_mksort_tiebreak &&
+			null_count >= MKQS_INSERTION_SORT_THRESHOLD)
 		{
 			mk_qsort_tuple(null_start,
 						   null_count,

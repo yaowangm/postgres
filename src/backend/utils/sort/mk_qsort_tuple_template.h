@@ -18,6 +18,11 @@
  *	  Inline function that compares two non-NULL datums in the sort
  *	  operator's natural direction.
  *
+ * MKQS_COMPARE_REMAINING
+ *	  Optional inline function that compares two SortTuples from the current
+ *	  depth through their tuple-type-specific final ordering key.  When
+ *	  defined, the template also generates an insertion-sort function.
+ *
  * MKQS_USE_ABBREVIATION
  *	  1 when the generated functions must handle abbreviated leading datums,
  *	  or 0 when abbreviation is excluded by dispatch.
@@ -44,6 +49,10 @@
 	MKQS_MAKE_NAME(mkqs_compare_to_pivot, MKQS_BASE_NAME)
 #define MKQS_APPLY_COMPARE \
 	MKQS_MAKE_NAME(mkqs_apply_compare, MKQS_BASE_NAME)
+#ifdef MKQS_COMPARE_REMAINING
+#define MKQS_INSERTION_SORT_NAME \
+	MKQS_MAKE_NAME(mkqs_insertion_sort, MKQS_BASE_NAME)
+#endif
 
 /* Apply common NULL and sort-direction semantics around a typed comparison. */
 static pg_attribute_always_inline int
@@ -102,6 +111,25 @@ MKQS_COMPARE_TUPLE(SortTuple *a, SortTuple *b, int depth,
 	datum2 = MKQS_GET_DATUM(b, sortKey, state, &isNull2);
 	return MKQS_APPLY_COMPARE(datum1, isNull1, datum2, isNull2, sortKey);
 }
+
+/* Sort a small partition over all remaining tuple ordering keys. */
+#ifdef MKQS_COMPARE_REMAINING
+static pg_attribute_always_inline void
+MKQS_INSERTION_SORT_NAME(SortTuple *x, size_t n, int depth,
+					Tuplesortstate *state)
+{
+	for (int m = 0; m < n; m++)
+	{
+		for (int l = m; l > 0; l--)
+		{
+			if (MKQS_COMPARE_REMAINING(x + l - 1, x + l, depth,
+									   state) <= 0)
+				break;
+			mkqs_swap(l, l - 1, x);
+		}
+	}
+}
+#endif
 
 /* Compare one tuple with the cached pivot using the specialized accessor. */
 static pg_attribute_always_inline int
@@ -223,6 +251,10 @@ MKQS_PARTITION(SortTuple *x, size_t n, int depth,
 #undef MKQS_COMPARE_DATUM
 #undef MKQS_GET_DATUM
 #undef MKQS_PARTITION
+#ifdef MKQS_COMPARE_REMAINING
+#undef MKQS_INSERTION_SORT_NAME
+#undef MKQS_COMPARE_REMAINING
+#endif
 #undef MKQS_USE_ABBREVIATION
 #undef MKQS_BASE_NAME
 #undef MKQS_MAKE_NAME

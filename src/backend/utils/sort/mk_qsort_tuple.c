@@ -178,9 +178,20 @@ mkqs_compare_datum_int32(Datum datum1, Datum datum2,
 	return value1 < value2 ? -1 : value1 > value2 ? 1 : 0;
 }
 
+static pg_attribute_always_inline int
+mkqs_compare_tuple_range(SortTuple *a, SortTuple *b,
+						 int start_depth, int max_depth,
+						 Tuplesortstate *state);
+
+static pg_attribute_always_inline int
+mkqs_compare_tuple_terminal_range(SortTuple *a, SortTuple *b, int depth,
+								  Tuplesortstate *state);
+
 #define MKQS_BASE_NAME heap_generic
 #define MKQS_GET_DATUM mkqs_get_heap_datum
 #define MKQS_COMPARE_DATUM mkqs_compare_datum_generic
+#define MKQS_COMPARE_REMAINING(a, b, depth, state) \
+	mkqs_compare_tuple_range(a, b, depth, state->base.nKeys - 1, state)
 #define MKQS_USE_ABBREVIATION 1
 #include "mk_qsort_tuple_template.h"
 
@@ -207,6 +218,7 @@ mkqs_compare_datum_int32(Datum datum1, Datum datum2,
 #define MKQS_BASE_NAME index_btree
 #define MKQS_GET_DATUM mkqs_get_index_datum
 #define MKQS_COMPARE_DATUM mkqs_compare_datum_generic
+#define MKQS_COMPARE_REMAINING mkqs_compare_tuple_terminal_range
 #define MKQS_USE_ABBREVIATION 1
 #include "mk_qsort_tuple_template.h"
 
@@ -271,6 +283,18 @@ mkqs_compare_tuple_range(SortTuple *a, SortTuple *b,
 	}
 
 	return 0;
+}
+
+/* Compare through the implicit final key owned by the tuple type. */
+static pg_attribute_always_inline int
+mkqs_compare_tuple_terminal_range(SortTuple *a, SortTuple *b, int depth,
+								  Tuplesortstate *state)
+{
+	SortTupleComparator compare = depth == 0 ? state->base.comparetup :
+		state->base.comparetup_tiebreak;
+
+	Assert(state->base.mkqsHandleDupFunc);
+	return compare(a, b, state);
 }
 
 /* Check the ordering covered by the caller-supplied full comparator. */
@@ -384,18 +408,21 @@ mk_qsort_tuple_impl(SortTuple *x,
 	 * Small inputs are cheaper to finish directly than to scan once and then
 	 * run insertion sort over the same tuples.
 	 */
-	if (n < MKQS_INSERTION_SORT_THRESHOLD &&
-		!state->base.mkqsHandleDupFunc)
+	if (n < MKQS_INSERTION_SORT_THRESHOLD)
 	{
-		for (m = 0; m < n; m++)
-			for (l = m; l > 0; l--)
-			{
-				if (mkqs_compare_tuple_range(x + l - 1, x + l, depth,
-											 state->base.nKeys - 1,
-											 state) <= 0)
-					break;
-				mkqs_swap(l, l - 1, x);
-			}
+		/*
+		 * A terminal handler means that equal explicit keys still have
+		 * tuple-specific ordering or validation work.  For example, btree
+		 * index tuples must be ordered by their implicit heap TID.  Use the
+		 * standard full comparator so insertion sort completes that terminal
+		 * work too.  Earlier depths are already equal within this recursive
+		 * partition, so the tiebreak comparator is sufficient when depth is
+		 * nonzero.
+		 */
+		if (state->base.mkqsHandleDupFunc)
+			mkqs_insertion_sort_index_btree(x, n, depth, state);
+		else
+			mkqs_insertion_sort_heap_generic(x, n, depth, state);
 		return;
 	}
 
