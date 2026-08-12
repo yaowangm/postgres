@@ -164,19 +164,23 @@ the algorithmic tradeoff.
 ### 5. The implementation spreads btree TID tiebreak knowledge too widely
 
 In standard sort, btree TID tiebreak behavior is confined to btree's full
-`comparetup` function. In the mksort patch, generic mksort code has to know
-about duplicate tuples and pass `seenNull` down to duplicate handling.
+`comparetup` function. In the original mksort patch reviewed here, generic
+mksort code had to know about duplicate tuples and pass `seenNull` down to
+duplicate handling. The current implementation has removed `seenNull`; unique
+btree sorts remain on the standard path, while non-unique btree mksort retains
+a terminal callback solely to order equal-key groups by heap TID.
 
-John suggests a design where a multi-key compare function accepts
+John suggested a design where a multi-key compare function accepts
 `start_depth` and `max_depth`. A btree implementation could interpret a depth
 beyond the last explicit sort key as the signal to compare TIDs. That would
 avoid a separate generic duplicate-handling abstraction and might remove the
 need for a separate `getDatum` function.
 
-Implication:
+Historical implication:
 
-The current abstraction is probably too generic in the wrong place. It leaks
-btree-specific behavior into generic mksort control flow.
+The abstraction reviewed at that time was probably too generic in the wrong
+place. The implicit-TID-depth alternative was evaluated but not adopted; the
+current implementation deliberately retains the terminal TID callback.
 
 ### 6. Pre-ordered checks are semantically unclear
 

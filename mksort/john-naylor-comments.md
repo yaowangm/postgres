@@ -19,7 +19,7 @@ standard sort 对 btree index tuple 的特殊语义集中在
 generic tuplesort 只调用 btree comparator，不需要知道 duplicate、unique
 constraint、NULL 或 TID 的存在。
 
-当前 mksort 将这些职责拆散到了多个层次：
+重构前的 mksort 将这些职责拆散到了多个层次：
 
 - **mkqs_get_datum()** 和 **MkqsGetDatumFunc** 按 depth 提取 datum。
 - generic **mk_qsort_tuple()** 识别最后一键的 equal partition。
@@ -28,7 +28,7 @@ constraint、NULL 或 TID 的存在。
 - btree 的 **mkqs_handle_dup_index_btree()** 检查 uniqueness，并对 duplicate
   group 再按 heap TID 排序。
 
-因此 generic mksort 开始了解原本应由 btree comparator 封装的知识。John
+因此当时的 generic mksort 开始了解原本应由 btree comparator 封装的知识。John
 所说的 “new single-use abstraction for the btree tid tiebreak” 主要指
 **MkqsHandleDupFunc / mkqs_handle_dup_index_btree()** 这一套 abstraction，
 而不是 **mkqs_compare_datum_tiebreak()**。
@@ -36,6 +36,11 @@ constraint、NULL 或 TID 的存在。
 后者虽然名称中包含 tiebreak，但实际负责当前显式排序键的 datum
 extraction、abbreviation full comparison 和 SortSupport comparison，并不是
 btree heap TID comparator。
+
+当前实现已经删除 **seenNull** 和 duplicate handler 中不可达的 unique-check
+分支。Unique btree tuplesort 仍使用 standard sort；non-unique btree mksort
+保留 **MkqsHandleDupFunc**，仅在所有显式键相等后按 heap TID 排序。将 TID
+表示为隐式最后 depth 的方案没有采用。
 
 ## 设计目标
 
@@ -195,11 +200,14 @@ if (base->nKeys > 1 && !enforceUnique)
     base->mkqsTupleType = MKQS_TUPLE_TYPE_INDEX_BTREE;
 ~~~
 
-因此第一阶段可以只支持当前可达的 non-unique btree 路径：
+因此当时建议第一阶段只支持可达的 non-unique btree 路径：
 
 - 删除 mksort duplicate handler 中不可达的 unique-check 分支。
 - 删除仅为该分支传递的 seenNull。
 - 将 TID 作为 btree 隐式最后 depth。
+
+当前实现采用了前两项，但没有采用第三项：TID 仍由 terminal duplicate
+handler 排序，不作为 mksort depth。
 
 未来若允许 unique btree 进入 mksort，必须单独设计：
 
@@ -868,7 +876,7 @@ boundary dispatch，但没有把所有固定属性都组合成专用函数，避
 -1.72% 的单样本尾值没有复现。perf 原始结果保存在
 `/home/wy/mksort/comment4-perf-prototype1.csv` 和对应的 `.data` 文件中。
 
-## 建议实施顺序
+## 未采用的 depth-aware comparator 方案实施顺序
 
 1. 为当前 heap 和 non-unique btree 行为增加 focused correctness tests。
 2. 定义 depth numbering、inclusive range 和 per-variant maximum depth。
@@ -882,6 +890,9 @@ boundary dispatch，但没有把所有固定属性都组合成专用函数，避
 9. 检查生成代码大小和 I-cache 指标，避免 specialization 组合爆炸。
 10. 比较 standard sort 与 mksort 的 correctness、instructions、CPI 和时间。
 11. 最后再决定是否以及如何支持 unique btree。
+
+这套顺序记录的是隐式 TID depth 方案，不是当前实施计划。当前代码保留
+**MkqsHandleDupFunc**，只删除了 **seenNull** 和不可达的 unique-check 分支。
 
 ## 必要测试
 
@@ -914,6 +925,6 @@ John 的建议不是因为某个 helper 只有一个调用点而简单删除函�
 - tuple-specific comparator 拥有 datum extraction 和完整 ordering semantics。
 - btree 自己拥有 explicit keys、unique/NULL 规则和 implicit TID。
 
-完整实施后，**mkqs_handle_dup_index_btree()** 应被 depth-aware btree
+如果未来重新采用完整的 depth-aware 方案，**mkqs_handle_dup_index_btree()** 可被
 comparator 取代，TID 成为普通的隐式最后 depth。mkqs_compare_datum 系列、
 独立 getDatum callback 和 generic duplicate handling 也应相应合并或删除。

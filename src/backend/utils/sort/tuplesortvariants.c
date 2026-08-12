@@ -2091,11 +2091,9 @@ mkqs_handle_dup_index_btree(SortTuple *x,
 							const int tupleCount,
 							Tuplesortstate *state)
 {
-	TuplesortPublic *base = TuplesortstateGetPublic(state);
-	TuplesortIndexBTreeArg *arg = (TuplesortIndexBTreeArg *) base->arg;
-
 	/* Unique btree builds are not eligible for mksort. */
-	Assert(!arg->enforceUnique);
+	Assert(!((TuplesortIndexBTreeArg *)
+			 TuplesortstateGetPublic(state)->arg)->enforceUnique);
 
 	/*
 	 * If key values are equal, we sort on ItemPointer.  This is required for

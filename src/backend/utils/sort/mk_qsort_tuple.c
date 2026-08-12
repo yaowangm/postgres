@@ -408,18 +408,19 @@ mk_qsort_tuple_impl(SortTuple *x,
 	if (n < MKQS_INSERTION_SORT_THRESHOLD)
 	{
 		/*
-		 * A terminal handler means that equal explicit keys still have
-		 * tuple-specific ordering or validation work.  For example, btree
-		 * index tuples must be ordered by their implicit heap TID.  Use the
-		 * standard full comparator so insertion sort completes that terminal
-		 * work too.  Earlier depths are already equal within this recursive
-		 * partition, so the tiebreak comparator is sufficient when depth is
-		 * nonzero.
+		 * Btree index tuples with equal explicit keys must still be ordered
+		 * by their implicit heap TID.  Use the standard full comparator so
+		 * insertion sort completes that terminal ordering too.  Earlier
+		 * depths are already equal within this recursive partition, so the
+		 * tiebreak comparator is sufficient when depth is nonzero.
 		 */
-		if (state->base.mkqsHandleDupFunc)
+		if (state->base.mkqsTupleType == MKQS_TUPLE_TYPE_INDEX_BTREE)
 			mkqs_insertion_sort_index_btree(x, n, depth, state);
 		else
+		{
+			Assert(state->base.mkqsTupleType == MKQS_TUPLE_TYPE_HEAP);
 			mkqs_insertion_sort_heap_generic(x, n, depth, state);
+		}
 		return;
 	}
 
